@@ -86,6 +86,7 @@ def ingest_pdf(client: MistralProtocol, *, filename: str, pdf_bytes: bytes) -> d
             "status": "ready",
             "document_id": doc_id,
             "filename": filename,
+            "sha256": sha,
             "num_pages": len(pages),
             "num_chunks": len(chunks),
             "ocr_pages": 0,

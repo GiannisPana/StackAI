@@ -105,3 +105,33 @@ def max_ready_row(conn: sqlite3.Connection) -> int:
         "WHERE d.status = 'ready' AND d.is_deleted = 0"
     ).fetchone()
     return -1 if row["m"] is None else int(row["m"])
+
+
+def mark_processing_and_failed_as_failed(conn: sqlite3.Connection) -> list[int]:
+    rows = conn.execute(
+        "SELECT id FROM documents WHERE status IN ('processing', 'failed')"
+    ).fetchall()
+    ids = [int(row["id"]) for row in rows]
+    for doc_id in ids:
+        conn.execute("UPDATE chunks SET embedding_row = NULL WHERE doc_id = ?", (doc_id,))
+        conn.execute("UPDATE documents SET status = 'failed' WHERE id = ?", (doc_id,))
+    return ids
+
+
+def fetch_ready_chunks_for_rebuild(conn: sqlite3.Connection) -> list[tuple[int, str]]:
+    rows = conn.execute(
+        "SELECT c.embedding_row, c.text FROM chunks c "
+        "JOIN documents d ON d.id = c.doc_id "
+        "WHERE d.status = 'ready' AND d.is_deleted = 0 AND c.embedding_row IS NOT NULL "
+        "ORDER BY c.embedding_row"
+    ).fetchall()
+    return [(int(row["embedding_row"]), str(row["text"])) for row in rows]
+
+
+def ready_row_set(conn: sqlite3.Connection) -> set[int]:
+    rows = conn.execute(
+        "SELECT c.embedding_row FROM chunks c "
+        "JOIN documents d ON d.id = c.doc_id "
+        "WHERE d.status = 'ready' AND d.is_deleted = 0 AND c.embedding_row IS NOT NULL"
+    ).fetchall()
+    return {int(row["embedding_row"]) for row in rows}
