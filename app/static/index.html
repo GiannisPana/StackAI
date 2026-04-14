@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>The Archive — StackAI RAG</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,500;0,9..144,700;0,9..144,900;1,9..144,400&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="grain"></div>
+
+  <header class="masthead">
+    <div class="masthead__rail">
+      <span class="rule-label">VOL. I</span>
+      <span class="rule-label">NO. 001</span>
+      <span class="rule-label" id="dateStamp"></span>
+    </div>
+    <h1 class="masthead__title">
+      <span class="title-line-1">The</span>
+      <span class="title-line-2">Archive</span>
+    </h1>
+    <p class="masthead__sub">
+      <em>A retrieval-augmented reading room</em> &middot; est. MMXXVI &middot; answers cited from your own documents
+    </p>
+    <div class="masthead__rail masthead__rail--bottom">
+      <span class="rule-label">INGEST · RETRIEVE · CITE</span>
+      <span class="rule-label">PDF ONLY</span>
+    </div>
+  </header>
+
+  <main class="layout">
+
+    <aside class="column column--ingest">
+      <div class="section-head">
+        <span class="section-num">§ I</span>
+        <h2 class="section-title">Deposit</h2>
+      </div>
+      <p class="section-lede">
+        Submit PDFs to the archive. Each document is parsed, chunked with layout awareness, embedded, and indexed for hybrid retrieval.
+      </p>
+
+      <label for="files" class="dropzone" id="dropzone">
+        <span class="dropzone__icon">&#8623;</span>
+        <span class="dropzone__primary">Drop files here</span>
+        <span class="dropzone__secondary">or click to browse &mdash; PDF, multiple accepted</span>
+        <input type="file" id="files" multiple accept="application/pdf" hidden>
+      </label>
+
+      <ul class="filelist" id="filelist"></ul>
+
+      <button class="btn btn--primary" id="ingestBtn" disabled>
+        <span class="btn__label">Commit to Archive</span>
+        <span class="btn__arrow">&rarr;</span>
+      </button>
+
+      <div class="ingest-log" id="ingestLog" hidden>
+        <div class="log-head">
+          <span class="rule-label">Transaction Log</span>
+        </div>
+        <div class="log-body" id="ingestOut"></div>
+      </div>
+    </aside>
+
+    <section class="column column--inquiry">
+      <div class="section-head">
+        <span class="section-num">§ II</span>
+        <h2 class="section-title">Inquiry</h2>
+      </div>
+      <p class="section-lede">
+        Pose your question. The archivist will consult the holdings and respond with annotated citations.
+      </p>
+
+      <form class="ask" id="askForm" autocomplete="off">
+        <div class="ask__prompt">&rsaquo;</div>
+        <input
+          type="text"
+          id="q"
+          class="ask__input"
+          placeholder="What does the record say&hellip;"
+          spellcheck="false"
+        >
+        <button class="btn btn--ghost" id="askBtn" type="submit">
+          <span class="btn__label">Ask</span>
+          <span class="btn__key">&crarr;</span>
+        </button>
+      </form>
+
+      <div class="answer-pane" id="answerPane" hidden>
+        <div class="answer-status" id="answerStatus"></div>
+
+        <article class="folio" id="folio">
+          <div class="folio__meta">
+            <span class="rule-label" id="folioIntent">&mdash;</span>
+            <span class="rule-label" id="folioFormat">&mdash;</span>
+            <span class="rule-label" id="folioLatency">&mdash;</span>
+          </div>
+
+          <div class="folio__body" id="answer"></div>
+
+          <div class="folio__warnings" id="warnings"></div>
+
+          <footer class="folio__foot">
+            <div class="section-head section-head--small">
+              <span class="section-num">&sect;</span>
+              <h3 class="section-title section-title--small">Citations</h3>
+            </div>
+            <ol class="citations" id="citations"></ol>
+          </footer>
+        </article>
+      </div>
+
+      <div class="placeholder" id="placeholder">
+        <p class="placeholder__line">&mdash; awaiting inquiry &mdash;</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="colophon">
+    <div class="colophon__rule"></div>
+    <div class="colophon__body">
+      <span>Set in <em>Fraunces</em> &amp; <em>JetBrains Mono</em></span>
+      <span>FastAPI &middot; Mistral &middot; NumPy &middot; SQLite</span>
+      <span>No third-party vector store</span>
+    </div>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

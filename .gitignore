@@ -11,3 +11,4 @@ venv/
 .worktrees/
 worktrees/
 .claude/
+build/

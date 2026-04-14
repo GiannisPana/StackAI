@@ -1,3 +1,10 @@
+"""
+Pydantic schemas for the StackAI RAG application API.
+
+This module defines the models used for requests and responses, ensuring
+type safety and providing automatic documentation for the FastAPI endpoints.
+"""
+
 from __future__ import annotations
 
 from typing import Literal
@@ -6,73 +13,89 @@ from pydantic import BaseModel, Field
 
 
 class IngestResultItem(BaseModel):
-    document_id: int | None = None
-    filename: str
-    sha256: str | None = None
-    num_pages: int | None = None
-    num_chunks: int | None = None
-    ocr_pages: int | None = None
-    status: Literal["ready", "skipped", "failed"]
-    reason: str | None = None
-    duration_ms: int | None = None
+    """Result details for an individual document ingestion attempt."""
+    
+    document_id: int | None = Field(None, description="Unique ID of the document if successfully indexed")
+    filename: str = Field(..., description="Original filename of the uploaded document")
+    sha256: str | None = Field(None, description="SHA-256 hash of the file content")
+    num_pages: int | None = Field(None, description="Total number of pages in the document")
+    num_chunks: int | None = Field(None, description="Number of text chunks created from the document")
+    ocr_pages: int | None = Field(None, description="Number of pages that required OCR")
+    status: Literal["ready", "skipped", "failed"] = Field(..., description="Processing status")
+    reason: str | None = Field(None, description="Detailed reason for the status (e.g. failure error)")
+    duration_ms: int | None = Field(None, description="Time taken to process in milliseconds")
 
 
 class IngestResponse(BaseModel):
-    ingested: list[IngestResultItem] = Field(default_factory=list)
-    skipped: list[IngestResultItem] = Field(default_factory=list)
-    failed: list[IngestResultItem] = Field(default_factory=list)
+    """Response model for the bulk ingestion endpoint."""
+    
+    ingested: list[IngestResultItem] = Field(default_factory=list, description="Documents successfully ingested")
+    skipped: list[IngestResultItem] = Field(default_factory=list, description="Documents skipped (e.g. duplicates)")
+    failed: list[IngestResultItem] = Field(default_factory=list, description="Documents that failed to process")
 
 
 class QueryRequest(BaseModel):
-    query: str = Field(min_length=1, max_length=2000)
-    top_k: int = Field(default=5, ge=1, le=20)
-    format: Literal["auto", "prose", "list", "table", "json"] = "auto"
-    document_ids: list[int] | None = None
-    enable_llm_rerank: bool = True
+    """Request model for the RAG query endpoint."""
+    
+    query: str = Field(..., min_length=1, max_length=2000, description="The user's natural language question")
+    top_k: int = Field(default=5, ge=1, le=20, description="Number of context chunks to retrieve")
+    format: Literal["auto", "prose", "list", "table", "json"] = Field("auto", description="Desired output format")
+    document_ids: list[int] | None = Field(None, description="Optional list of document IDs to restrict the search")
+    enable_llm_rerank: bool = Field(True, description="Whether to use the LLM to rerank retrieved chunks")
 
 
 class Citation(BaseModel):
-    index: int
-    document_id: int
-    filename: str
-    page: int
-    chunk_id: int
-    text: str
-    score: float
+    """Reference to a specific document chunk used in the answer."""
+    
+    index: int = Field(..., description="Citation index as used in the answer text (e.g. 1 for [1])")
+    document_id: int = Field(..., description="Database ID of the source document")
+    filename: str = Field(..., description="Name of the source document")
+    page: int = Field(..., description="1-based page number in the source document")
+    chunk_id: int = Field(..., description="Database ID of the source chunk")
+    text: str = Field(..., description="Text content of the cited chunk")
+    score: float = Field(..., description="Relevance score of the chunk")
 
 
 class Verification(BaseModel):
-    all_supported: bool = True
-    unsupported_sentences: list[int] = Field(default_factory=list)
+    """Validation details for the generated answer."""
+    
+    all_supported: bool = Field(True, description="Whether all claims in the answer are supported by citations")
+    unsupported_sentences: list[int] = Field(default_factory=list, description="Indices of sentences lacking support")
 
 
 class PolicyInfo(BaseModel):
-    pii_masked: bool = False
-    pii_entities: list[str] = Field(default_factory=list)
-    disclaimer: Literal["legal", "medical"] | None = None
+    """Information regarding safety and compliance policies."""
+    
+    pii_masked: bool = Field(False, description="Whether PII was detected and masked in the response")
+    pii_entities: list[str] = Field(default_factory=list, description="Types of PII entities found")
+    disclaimer: Literal["legal", "medical"] | None = Field(None, description="Disclaimer type applied")
 
 
 class DebugInfo(BaseModel):
-    masked_query: str | None = None
-    rewritten_query: str | None = None
-    expansion_queries: list[str] = Field(default_factory=list)
-    hyde_document: str | None = None
-    used_hyde: bool = False
-    num_candidates: int | None = None
-    top_score: float | None = None
-    threshold: float | None = None
-    latency_ms: dict[str, int] = Field(default_factory=dict)
+    """Detailed internal metrics and intermediate results for debugging."""
+    
+    masked_query: str | None = Field(None, description="The query after PII masking")
+    rewritten_query: str | None = Field(None, description="The query after LLM rewriting")
+    expansion_queries: list[str] = Field(default_factory=list, description="Additional queries generated for expansion")
+    hyde_document: str | None = Field(None, description="Synthesized HyDE document text")
+    used_hyde: bool = Field(False, description="Whether HyDE was used in retrieval")
+    num_candidates: int | None = Field(None, description="Total number of candidates retrieved before filtering")
+    top_score: float | None = Field(None, description="Highest relevance score found")
+    threshold: float | None = Field(None, description="Score threshold applied")
+    latency_ms: dict[str, int] = Field(default_factory=dict, description="Latency breakdown for different stages")
 
 
 class QueryResponse(BaseModel):
-    answer: str
-    format: Literal["prose", "list", "table", "json"] = "prose"
-    intent: Literal["search", "no_search", "refuse"] = "search"
-    sub_intent: str | None = None
-    citations: list[Citation] = Field(default_factory=list)
-    structured: dict | None = None
-    verification: Verification = Field(default_factory=Verification)
-    policy: PolicyInfo = Field(default_factory=PolicyInfo)
-    refusal_reason: str | None = None
-    warnings: list[str] = Field(default_factory=list)
-    debug: DebugInfo | None = None
+    """Final response model for a RAG query."""
+    
+    answer: str = Field(..., description="The natural language answer generated by the LLM")
+    format: Literal["prose", "list", "table", "json"] = Field("prose", description="The format of the returned answer")
+    intent: Literal["search", "no_search", "refuse"] = Field("search", description="Detected intent of the query")
+    sub_intent: str | None = Field(None, description="More granular intent classification")
+    citations: list[Citation] = Field(default_factory=list, description="List of source citations")
+    structured: dict | None = Field(None, description="Structured data if requested in JSON format")
+    verification: Verification = Field(default_factory=Verification, description="Claim verification results")
+    policy: PolicyInfo = Field(default_factory=PolicyInfo, description="Compliance and safety metadata")
+    refusal_reason: str | None = Field(None, description="Reason if the system refused to answer")
+    warnings: list[str] = Field(default_factory=list, description="Non-critical warnings encountered during processing")
+    debug: DebugInfo | None = Field(None, description="Debugging information (only if enabled)")

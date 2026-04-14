@@ -1,3 +1,10 @@
+"""SQLite database management for document metadata.
+
+This module provides functions for database connectivity, transaction management,
+and schema initialization. It ensures data consistency and optimal performance
+for concurrent access.
+"""
+
 from __future__ import annotations
 
 import sqlite3
@@ -10,9 +17,16 @@ SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 
 def get_connection() -> sqlite3.Connection:
+    """Creates a new SQLite connection with optimized settings.
+
+    It enables foreign keys and uses Write-Ahead Logging (WAL) mode to
+    support concurrent readers and a single writer without blocking.
+    """
     settings = get_settings()
     conn = sqlite3.connect(settings.db_path, isolation_level=None)
+    # Ensure database-level referential integrity
     conn.execute("PRAGMA foreign_keys = ON")
+    # Enable WAL mode for better concurrency performance
     conn.execute("PRAGMA journal_mode = WAL")
     conn.row_factory = sqlite3.Row
     return conn
@@ -20,6 +34,7 @@ def get_connection() -> sqlite3.Connection:
 
 @contextmanager
 def transaction(conn: sqlite3.Connection):
+    """Context manager for explicit transaction management."""
     conn.execute("BEGIN")
     try:
         yield
@@ -30,6 +45,12 @@ def transaction(conn: sqlite3.Connection):
 
 
 def init_schema() -> None:
+    """Initializes the database schema and verifies configuration consistency.
+
+    If the database is being created or updated, it ensures that the
+    'embedding_dim' in the database matches the current application configuration.
+    This prevents mismatches that would cause runtime errors during retrieval.
+    """
     settings = get_settings()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -47,6 +68,7 @@ def init_schema() -> None:
             if key not in existing:
                 conn.execute("INSERT INTO meta (key, value) VALUES (?, ?)", (key, value))
             elif key == "embedding_dim":
+                # Guard against loading data with different vector dimensions
                 current = conn.execute(
                     "SELECT value FROM meta WHERE key = 'embedding_dim'"
                 ).fetchone()["value"]
