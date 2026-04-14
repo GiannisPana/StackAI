@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import hashlib
 import os
+import sqlite3
 from typing import Any
 
 from app.config import get_settings
 from app.deps import get_store
 from app.ingestion.chunker import chunk_pages
-from app.ingestion.pdf_parser import parse_pdf
+from app.ingestion.pdf_parser import parse_pdf, is_low_text_page, PageContent
 from app.mistral_client import MistralProtocol
 from app.retrieval.bm25 import BM25Index
 from app.retrieval.embeddings import embed_texts
@@ -39,11 +40,69 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _mark_failed(conn, doc_id: int) -> None:
+def _cleanup_tmp_files(*paths: object) -> None:
+    """Best-effort removal of staged temp files after a failed publish."""
+    for path in paths:
+        if path is None:
+            continue
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _maybe_ocr_pages(client: MistralProtocol, pdf_bytes: bytes,
+                     pages: list[PageContent]) -> tuple[list[PageContent], int, set[int]]:
+    """Identify low-text pages and process them through OCR if necessary."""
+    low_indices = [i for i, p in enumerate(pages) if is_low_text_page(p)]
+    if not low_indices:
+        return pages, 0, set()
+
+    ocr_text = client.ocr(pdf_bytes).strip()
+    if not ocr_text:
+        return pages, 0, set()
+
+    if len(pages) == 1:
+        page_texts = [ocr_text]
+    else:
+        split_pages = [part.strip() for part in ocr_text.split("\f")]
+        if len(split_pages) == len(pages):
+            page_texts = split_pages
+        elif len(low_indices) == 1:
+            # A single OCR candidate can safely use the flat output.
+            page_texts = [ocr_text if i == low_indices[0] else "" for i in range(len(pages))]
+        else:
+            # Without page boundaries, duplicating the full OCR output onto
+            # multiple pages inflates both BM25 and the vector index.
+            return pages, 0, set()
+
+    new_pages = list(pages)
+    ocr_page_nums = set()
+    for i in low_indices:
+        page_text = page_texts[i].strip()
+        if not page_text:
+            continue
+        from app.ingestion.pdf_parser import Block, PageContent as PC
+        bbox = (0.0, 0.0, 612.0, 792.0) # Default A4
+        new_pages[i] = PC(
+            page_num=pages[i].page_num,
+            blocks=[Block(text=page_text, bbox=bbox, font_size=11.0)],
+            raw_text=page_text,
+        )
+        ocr_page_nums.add(pages[i].page_num)
+    return new_pages, len(ocr_page_nums), ocr_page_nums
+
+
+def _mark_failed(doc_id: int, *, conn: sqlite3.Connection | None = None) -> None:
     """Set document status to failed and clean up pending chunk metadata."""
-    with transaction(conn):
-        conn.execute("UPDATE chunks SET embedding_row = NULL WHERE doc_id = ?", (doc_id,))
-        update_document_status(conn, doc_id, "failed")
+    target = conn if conn is not None else get_connection()
+    try:
+        with transaction(target):
+            target.execute("UPDATE chunks SET embedding_row = NULL WHERE doc_id = ?", (doc_id,))
+            update_document_status(target, doc_id, "failed")
+    finally:
+        if conn is None:
+            target.close()
 
 
 def ingest_pdf(client: MistralProtocol, *, filename: str, pdf_bytes: bytes) -> dict[str, Any]:
@@ -77,31 +136,54 @@ def ingest_pdf(client: MistralProtocol, *, filename: str, pdf_bytes: bytes) -> d
     # PHASE 1: Parsing, Chunking and Embedding
     try:
         pages = parse_pdf(pdf_bytes)
-    except Exception as exc:
-        return {"status": "failed", "reason": f"invalid PDF: {exc}", "filename": filename}
+        pages, ocr_pages, ocr_page_nums = _maybe_ocr_pages(client, pdf_bytes, pages)
+        
+        chunks = chunk_pages(
+            pages,
+            max_tokens=settings.max_tokens_per_chunk,
+            overlap=settings.chunk_overlap_tokens,
+        )
+        
+        if not chunks:
+            return {"status": "failed", "reason": "no extractable text", "filename": filename}
 
-    chunks = chunk_pages(
-        pages,
-        max_tokens=settings.max_tokens_per_chunk,
-        overlap=settings.chunk_overlap_tokens,
-    )
-    embeddings = embed_texts(client, [chunk.text for chunk in chunks])
+        # Mark OCR-sourced chunks
+        if ocr_page_nums:
+            from dataclasses import replace
+            chunks = [
+                replace(c, source="ocr") if c.page in ocr_page_nums else c 
+                for c in chunks
+            ]
+            
+        embeddings = embed_texts(client, [chunk.text for chunk in chunks])
+    except Exception as exc:
+        return {"status": "failed", "reason": f"parsing/embedding: {exc}", "filename": filename}
 
     # PHASE 2: Staging and Atomic Publishing
-    conn = get_connection()
-    try:
-        # Step A: Preliminary database entry (Document and Chunks)
-        with transaction(conn):
-            doc_id = insert_document(
-                conn,
-                filename=filename,
-                sha256=sha,
-                num_pages=len(pages),
-                num_chunks=len(chunks),
-            )
-            insert_chunks(conn, doc_id, chunks)
+    with store.writer_lock:
+        conn = get_connection()
+        try:
+            existing = get_document_by_sha256(conn, sha)
+            if existing is not None and existing.status == "ready" and not existing.is_deleted:
+                return {
+                    "status": "skipped",
+                    "reason": "already ingested",
+                    "document_id": existing.id,
+                    "filename": filename,
+                }
 
-        with store.writer_lock:
+            # Step A: Database entry (Document and Chunks)
+            with transaction(conn):
+                doc_id = insert_document(
+                    conn,
+                    filename=filename,
+                    sha256=sha,
+                    num_pages=len(pages),
+                    num_chunks=len(chunks),
+                    ocr_pages=ocr_pages,
+                )
+                insert_chunks(conn, doc_id, chunks)
+
             # Step B: Stage Vector Matrix update
             base_row = store.embeddings.shape[0]
             new_matrix = build_concat_matrix(store.embeddings, embeddings)
@@ -109,17 +191,15 @@ def ingest_pdf(client: MistralProtocol, *, filename: str, pdf_bytes: bytes) -> d
 
             # Step C: Stage BM25 Index update
             bm25 = BM25Index(k1=settings.bm25_k1, b=settings.bm25_b)
-            # Rebuild index from all ready chunks to ensure consistency
             for row_id, text in fetch_ready_chunks_for_rebuild(conn):
                 bm25.add(row_id, text)
-            # Add newly ingested chunks
             for offset, chunk in enumerate(chunks):
                 bm25.add(base_row + offset, chunk.text)
             bm25.finalize()
             bm25_tmp = save_bm25(
                 settings.bm25_path,
                 bm25,
-                publish=False, # Write to .tmp first
+                publish=False,
             )
 
             # Step D: Finalize Database State
@@ -137,28 +217,21 @@ def ingest_pdf(client: MistralProtocol, *, filename: str, pdf_bytes: bytes) -> d
             store.embeddings = new_matrix
             store.bm25 = bm25
             store.ready_rows = ready_row_set(conn)
+        except Exception as exc:
+            _cleanup_tmp_files(matrix_tmp, bm25_tmp)
+            if doc_id is not None:
+                _mark_failed(doc_id, conn=conn)
+                store.ready_rows = ready_row_set(conn)
+            return {"status": "failed", "reason": f"publish: {exc}", "filename": filename}
+        finally:
+            conn.close()
 
-        return {
-            "status": "ready",
-            "document_id": doc_id,
-            "filename": filename,
-            "sha256": sha,
-            "num_pages": len(pages),
-            "num_chunks": len(chunks),
-            "ocr_pages": 0,
-        }
-    except Exception as exc:
-        # Rollback: Remove temporary files if something went wrong before publishing
-        for tmp in (
-            settings.embeddings_path.with_suffix(settings.embeddings_path.suffix + ".tmp"),
-            settings.bm25_path.with_suffix(settings.bm25_path.suffix + ".tmp"),
-        ):
-            try:
-                tmp.unlink()
-            except FileNotFoundError:
-                pass
-        if doc_id is not None:
-            _mark_failed(conn, doc_id)
-        return {"status": "failed", "reason": f"publish: {exc}", "filename": filename}
-    finally:
-        conn.close()
+    return {
+        "status": "ready",
+        "document_id": doc_id,
+        "filename": filename,
+        "sha256": sha,
+        "num_pages": len(pages),
+        "num_chunks": len(chunks),
+        "ocr_pages": ocr_pages,
+    }

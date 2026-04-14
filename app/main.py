@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.api.documents import router as documents_router
 from app.api.ingest import router as ingest_router
 from app.api.query import router as query_router
 from app.config import get_settings
@@ -67,14 +68,18 @@ def create_app() -> FastAPI:
     # Include API routers.
     app.include_router(ingest_router)
     app.include_router(query_router)
+    app.include_router(documents_router)
 
     # Serve the chat UI.
     static_dir = Path(__file__).parent / "static"
-    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+    if static_dir.exists():
+        app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
     @app.get("/", include_in_schema=False)
     def index():
-        return FileResponse(static_dir / "index.html")
+        if static_dir.exists():
+            return FileResponse(static_dir / "index.html")
+        return {"error": "UI static files not found"}
 
     @app.get("/health")
     def health():

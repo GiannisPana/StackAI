@@ -47,9 +47,27 @@ def run_recovery() -> None:
         # Truncate the embedding matrix to discard orphaned rows from crashed ingestions
         expected_len = max_ready_row(conn) + 1
         matrix = load_matrix(settings.embeddings_path, expected_dim=settings.embedding_dim)
+        
         if matrix.shape[0] > expected_len:
+            # Corruption: Matrix is longer than DB records. Truncate it.
             matrix = matrix[:expected_len].copy()
             save_matrix_atomic(settings.embeddings_path, matrix)
+        elif matrix.shape[0] < expected_len:
+            # Corruption: Matrix is shorter than DB records. 
+            # Roll back documents that reference missing rows to 'failed'.
+            missing_threshold = matrix.shape[0]
+            with transaction(conn):
+                affected = conn.execute(
+                    "SELECT DISTINCT doc_id FROM chunks WHERE embedding_row >= ?",
+                    (missing_threshold,)
+                ).fetchall()
+                for r in affected:
+                    did = r["doc_id"]
+                    conn.execute("UPDATE chunks SET embedding_row = NULL WHERE doc_id = ?", (did,))
+                    conn.execute("UPDATE documents SET status = 'failed' WHERE id = ?", (did,))
+            # Re-calculate expected_len after rollback
+            expected_len = max_ready_row(conn) + 1
+            touched.extend([r["doc_id"] for r in affected])
 
         # Rebuild BM25 index from scratch if any documents were lost or file is missing
         need_rebuild = bool(touched) or not settings.bm25_path.exists()

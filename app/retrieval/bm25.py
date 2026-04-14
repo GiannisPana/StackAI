@@ -75,6 +75,8 @@ class BM25Index:
             row_id: Unique identifier for the document.
             text: Raw content of the document.
         """
+        if row_id in self._doc_len:
+            raise ValueError(f"BM25 row_id {row_id} already exists")
         tokens = tokenize(text)
         self._doc_len[row_id] = len(tokens)
         counts: dict[str, int] = defaultdict(int)
@@ -91,14 +93,15 @@ class BM25Index:
         Computes average document length (avgdl) and total document count.
         """
         self._num_docs = len(self._doc_len)
-        total = sum(self._doc_len.values())
-        self._avgdl = total / self._num_docs if self._num_docs else 0.0
+        total_len = sum(self._doc_len.values())
+        self._avgdl = (total_len / self._num_docs) if self._num_docs > 0 else 0.0
         self._finalized = True
 
     def _idf(self, term: str) -> float:
         """Calculate Inverse Document Frequency (IDF) for a term.
 
-        Uses the BM25+ IDF variant to avoid negative values for high-frequency terms.
+        Uses a BM25-style IDF variant and floors the result slightly above zero
+        so ubiquitous terms still retain a minimal weight.
 
         Args:
             term: The token to calculate IDF for.
@@ -109,8 +112,9 @@ class BM25Index:
         df = len(self._postings.get(term, {}))
         if df == 0:
             return 0.0
-        # BM25 IDF formula variant ensuring non-negativity
-        return math.log(1 + (self._num_docs - df + 0.5) / (df + 0.5))
+        # Floor near-zero weights so terms present in every document still
+        # contribute a tiny amount during ranking.
+        return max(0.01, math.log(1 + (self._num_docs - df + 0.5) / (df + 0.5)))
 
     def top_k(
         self,

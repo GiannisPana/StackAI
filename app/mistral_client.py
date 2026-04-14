@@ -97,7 +97,8 @@ class MistralClient:
     def ocr(self, pdf_bytes: bytes) -> str:
         """Extracts text content from a PDF using Mistral's OCR service.
 
-        Returns a single markdown string representing all pages.
+        Returns page-delimited markdown text. Pages are separated with form-feed
+        characters so callers can preserve page boundaries when needed.
         """
         from base64 import b64encode
 
@@ -111,7 +112,7 @@ class MistralClient:
                 "document_name": "document.pdf",
             },
         )
-        return "\n".join(page.markdown or "" for page in response.pages)
+        return "\f".join(page.markdown or "" for page in response.pages)
 
 
 def get_mistral_client() -> MistralProtocol:

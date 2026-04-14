@@ -26,8 +26,9 @@ from fastapi import APIRouter, HTTPException
 from app.api.schemas import Citation, DebugInfo, PolicyInfo, QueryRequest, QueryResponse, Verification
 from app.config import get_settings
 from app.deps import get_store
-from app.generation.generator import generate_answer
+from app.generation.generator import extract_citations, generate_answer
 from app.generation.query_transform import transform_query
+from app.generation.templates import DISCLAIMERS
 from app.mistral_client import get_mistral_client
 from app.retrieval.mmr import mmr_select
 from app.retrieval.rerank import llm_rerank
@@ -39,6 +40,9 @@ router = APIRouter()
 
 # Maximum number of candidates forwarded to the LLM reranker in a single call.
 _RERANK_WINDOW = 20
+
+_LEGAL_HINTS = ("law", "legal", "lawsuit", "sue", "attorney", "contract")
+_MEDICAL_HINTS = ("medical", "doctor", "dosage", "prescription", "treatment", "diagnosis")
 
 
 def _load_chunks(rows: list[int]) -> dict[int, dict]:
@@ -100,14 +104,64 @@ def _threshold_passed(
     if top_score >= threshold_high:
         return True, top_score
 
+    # Plan: single candidate pools below threshold_high are OK
+    if len(candidates) < 2:
+        return True, top_score
+
     # Spread check: a clear winner can pass even below threshold_high.
-    if len(candidates) >= 2:
-        median = candidates[len(candidates) // 2].score
-        spread = (top_score - median) / top_score if top_score > 0 else 0.0
-        if spread >= spread_min:
+    median = candidates[len(candidates) // 2].score
+    if top_score > 0:
+        spread = (top_score - median) / top_score
+        if spread >= spread_min and spread > 0:
             return True, top_score
 
     return False, top_score
+
+
+def _detect_disclaimer(query: str) -> str | None:
+    """Return a lightweight topic disclaimer hint for legal or medical queries."""
+    lowered = query.lower()
+    if any(term in lowered for term in _MEDICAL_HINTS):
+        return "medical"
+    if any(term in lowered for term in _LEGAL_HINTS):
+        return "legal"
+    return None
+
+
+def _apply_disclaimer(answer: str, disclaimer: str | None) -> str:
+    """Prepend the configured disclaimer text if one should be applied."""
+    if not disclaimer or disclaimer not in DISCLAIMERS:
+        return answer
+
+    prefix = DISCLAIMERS[disclaimer]
+    text = answer.strip()
+    if text.startswith(prefix):
+        return text
+    if not text:
+        return prefix
+    return f"{prefix}\n\n{text}"
+
+
+def _verify_answer_citations(answer: str, *, disclaimer: str | None) -> Verification:
+    """Treat uncited answer sentences as unsupported until the full verifier lands."""
+    text = answer.strip()
+    if disclaimer and disclaimer in DISCLAIMERS:
+        prefix = DISCLAIMERS[disclaimer]
+        if text.startswith(prefix):
+            text = text[len(prefix):].strip()
+
+    if not text:
+        return Verification(all_supported=False, unsupported_sentences=[])
+
+    unsupported = [
+        index
+        for index, citations in enumerate(extract_citations(text))
+        if not citations
+    ]
+    return Verification(
+        all_supported=not unsupported,
+        unsupported_sentences=unsupported,
+    )
 
 
 @router.post("/query", response_model=QueryResponse)
@@ -127,9 +181,16 @@ def query_endpoint(req: QueryRequest) -> QueryResponse:
     """
     settings = get_settings()
     client = get_mistral_client()
+    store = get_store()
+    
+    # Snapshot ready_rows for consistency throughout the request
+    active_rows = store.ready_rows
+    
     t0 = time.monotonic()
     timings: dict[str, int] = {}
     warnings: list[str] = []
+    disclaimer = _detect_disclaimer(req.query)
+    response_format = "prose"
 
     # ------------------------------------------------------------------
     # Step 1: Classify intent and rewrite query for retrieval.
@@ -140,10 +201,12 @@ def query_endpoint(req: QueryRequest) -> QueryResponse:
     # Short-circuit: greetings and chit-chat — no retrieval needed.
     if transform.intent == "no_search":
         return QueryResponse(
-            answer="Hello! Ask me anything about your uploaded documents.",
+            answer=_apply_disclaimer("Hello! Ask me anything about your uploaded documents.", disclaimer),
+            format=response_format,
             intent="no_search",
             sub_intent=transform.sub_intent,
             warnings=warnings,
+            policy=PolicyInfo(disclaimer=disclaimer),
             debug=DebugInfo(
                 rewritten_query=transform.rewritten_query,
                 latency_ms=timings | {"total": int((time.monotonic() - t0) * 1000)},
@@ -155,14 +218,16 @@ def query_endpoint(req: QueryRequest) -> QueryResponse:
     # Short-circuit: personalised legal / medical advice — policy refusal.
     if transform.intent == "refuse":
         return QueryResponse(
-            answer=(
+            answer=_apply_disclaimer(
                 "I can't provide personal advice on this topic. "
                 "I can summarise what the uploaded documents say about it if you'd like."
-            ),
+            , disclaimer),
+            format=response_format,
             intent="refuse",
             sub_intent=transform.sub_intent,
             refusal_reason="personalized_advice",
             warnings=warnings,
+            policy=PolicyInfo(disclaimer=disclaimer),
             debug=DebugInfo(
                 rewritten_query=transform.rewritten_query,
                 latency_ms=timings | {"total": int((time.monotonic() - t0) * 1000)},
@@ -203,17 +268,22 @@ def query_endpoint(req: QueryRequest) -> QueryResponse:
     # ------------------------------------------------------------------
     retrieval_query = transform.rewritten_query or req.query
     retrieve_start = time.monotonic()
-    candidates = hybrid_retrieve(client, query=retrieval_query, mask=mask)
+    candidates = hybrid_retrieve(client, query=retrieval_query, mask=mask, active_rows=active_rows)
     timings["retrieve"] = int((time.monotonic() - retrieve_start) * 1000)
 
     if not candidates:
         return QueryResponse(
-            answer="I don't have sufficient evidence in the indexed documents to answer this question.",
+            answer=_apply_disclaimer(
+                "I don't have sufficient evidence in the indexed documents to answer this question.",
+                disclaimer,
+            ),
+            format=response_format,
             intent="search",
             sub_intent=transform.sub_intent,
             refusal_reason="insufficient_evidence",
             citations=[],
             warnings=warnings,
+            policy=PolicyInfo(disclaimer=disclaimer),
             debug=DebugInfo(
                 rewritten_query=transform.rewritten_query,
                 expansion_queries=transform.expansion_queries,
@@ -253,12 +323,17 @@ def query_endpoint(req: QueryRequest) -> QueryResponse:
     )
     if not passed:
         return QueryResponse(
-            answer="I don't have sufficient evidence in the indexed documents to answer this question.",
+            answer=_apply_disclaimer(
+                "I don't have sufficient evidence in the indexed documents to answer this question.",
+                disclaimer,
+            ),
+            format=response_format,
             intent="search",
             sub_intent=transform.sub_intent,
             refusal_reason="insufficient_evidence",
             citations=[],
             warnings=warnings,
+            policy=PolicyInfo(disclaimer=disclaimer),
             debug=DebugInfo(
                 rewritten_query=transform.rewritten_query,
                 expansion_queries=transform.expansion_queries,
@@ -304,8 +379,10 @@ def query_endpoint(req: QueryRequest) -> QueryResponse:
     generate_start = time.monotonic()
     # Pass the original user-facing query to the generator so the answer
     # addresses the question as the user phrased it.
-    answer = generate_answer(client, query=req.query, chunks=numbered, disclaimer=None)
+    answer = generate_answer(client, query=req.query, chunks=numbered, disclaimer=disclaimer)
     timings["generate"] = int((time.monotonic() - generate_start) * 1000)
+    answer = _apply_disclaimer(answer, disclaimer)
+    verification = _verify_answer_citations(answer, disclaimer=disclaimer)
 
     citations: list[Citation] = []
     for index, row in enumerate(final_rows, start=1):
@@ -327,11 +404,12 @@ def query_endpoint(req: QueryRequest) -> QueryResponse:
 
     return QueryResponse(
         answer=answer,
+        format=response_format,
         intent="search",
         sub_intent=transform.sub_intent,
         citations=citations,
-        verification=Verification(),
-        policy=PolicyInfo(),
+        verification=verification,
+        policy=PolicyInfo(disclaimer=disclaimer),
         warnings=warnings,
         debug=DebugInfo(
             rewritten_query=transform.rewritten_query,

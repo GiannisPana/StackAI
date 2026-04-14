@@ -79,9 +79,5 @@ def parse_pdf(pdf_bytes: bytes) -> list[PageContent]:
 
 
 def is_low_text_page(page: PageContent, min_chars: int = 50) -> bool:
-    """
-    Determine if a page has very little text.
-    
-    Used to identify pages that might require OCR or are mostly images/empty.
-    """
+    """True if the page has very little extractable text (likely scanned)."""
     return len(page.raw_text.strip()) < min_chars

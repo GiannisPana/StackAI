@@ -28,6 +28,7 @@ def hybrid_retrieve(
     *,
     query: str,
     mask: set[int] | None,
+    active_rows: set[int],
     per_query_k: int = 50,
 ) -> list[Candidate]:
     """Perform hybrid retrieval by merging vector search and BM25 results.
@@ -42,6 +43,7 @@ def hybrid_retrieve(
         client: API client for generating query embeddings.
         query: Raw search query string.
         mask: Optional set of row IDs to restrict the search.
+        active_rows: Set of row IDs for documents ready and not deleted.
         per_query_k: Number of results to fetch from each retriever.
 
     Returns:
@@ -49,7 +51,7 @@ def hybrid_retrieve(
     """
     store = get_store()
     # Apply global document status mask (e.g., exclude documents being deleted)
-    effective_mask = store.ready_rows if mask is None else (mask & store.ready_rows)
+    effective_mask = active_rows if mask is None else (mask & active_rows)
 
     # 1. Vector Retrieval: Dense search based on semantic meaning
     query_vec = client.embed(query)

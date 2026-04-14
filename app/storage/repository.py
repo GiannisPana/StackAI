@@ -206,3 +206,72 @@ def row_set_for_documents(conn: sqlite3.Connection, doc_ids: list[int]) -> set[i
         doc_ids,
     ).fetchall()
     return {int(row["embedding_row"]) for row in rows}
+
+
+def list_documents(conn: sqlite3.Connection) -> list[DocumentRow]:
+    """
+    Return all documents ordered by ingestion time, newest first.
+
+    Args:
+        conn: An open SQLite connection.
+
+    Returns:
+        A list of :class:`DocumentRow` instances.
+    """
+    rows = conn.execute(
+        "SELECT * FROM documents ORDER BY ingested_at DESC"
+    ).fetchall()
+    return [_to_document_row(row) for row in rows]  # type: ignore[misc]
+
+
+def get_document_by_id(conn: sqlite3.Connection, doc_id: int) -> DocumentRow | None:
+    """
+    Fetch a single document record by primary key, regardless of deleted status.
+
+    Used by the delete endpoint to distinguish "not found" (returns None) from
+    "already deleted" (returns a row with ``is_deleted = 1``).
+
+    Args:
+        conn: An open SQLite connection.
+        doc_id: The document primary key.
+
+    Returns:
+        A :class:`DocumentRow` or ``None`` if no record with that ID exists.
+    """
+    row = conn.execute(
+        "SELECT * FROM documents WHERE id = ?", (doc_id,)
+    ).fetchone()
+    return _to_document_row(row)
+
+
+def soft_delete_document(conn: sqlite3.Connection, doc_id: int) -> list[int]:
+    """
+    Mark a document as deleted and return the embedding row indices it owned.
+
+    The document row itself is kept for audit purposes; only ``is_deleted`` and
+    ``deleted_at`` are updated.  The returned row indices must be removed from
+    the in-memory :class:`~app.deps.Store` by the caller.
+
+    This function must be called inside an active transaction.
+
+    Args:
+        conn: An open SQLite connection with an active transaction.
+        doc_id: The document primary key to soft-delete.
+
+    Returns:
+        A list of ``embedding_row`` integers that belonged to this document
+        and should be evicted from the in-memory store.
+    """
+    # Collect the embedding rows before marking as deleted so the caller can
+    # evict them from the in-memory store atomically under the writer lock.
+    chunk_rows = conn.execute(
+        "SELECT embedding_row FROM chunks WHERE doc_id = ? AND embedding_row IS NOT NULL",
+        (doc_id,),
+    ).fetchall()
+    affected = [int(r["embedding_row"]) for r in chunk_rows]
+
+    conn.execute(
+        "UPDATE documents SET is_deleted = 1, deleted_at = ? WHERE id = ?",
+        (_now(), doc_id),
+    )
+    return affected
