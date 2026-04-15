@@ -7,6 +7,8 @@ inputs for the LLM. It includes pre-defined disclaimers for specific domains.
 
 from __future__ import annotations
 
+from typing import Literal
+
 # Standard disclaimers for specific sensitive domains.
 DISCLAIMERS = {
     "legal": (
@@ -27,6 +29,12 @@ SYSTEM_PROSE = (
     "enough information to answer, say so briefly instead of guessing."
 )
 
+SYSTEM_STRUCTURED = (
+    "You are a careful assistant answering strictly from the provided numbered context chunks. "
+    "Return STRICT JSON only. Every factual statement in the top-level answer string must keep "
+    "inline [n] citations that refer to the provided chunk numbers."
+)
+
 
 def _format_chunks(chunks: list[tuple[int, str]]) -> str:
     """
@@ -39,6 +47,30 @@ def _format_chunks(chunks: list[tuple[int, str]]) -> str:
         A formatted string with chunks separated by double newlines.
     """
     return "\n\n".join(f"[{index}] {text}" for index, text in chunks)
+
+
+def _disclaimer_instruction(disclaimer: str | None) -> str | None:
+    if disclaimer and disclaimer in DISCLAIMERS:
+        return f"Prepend this disclaimer to your answer: {DISCLAIMERS[disclaimer]}"
+    return None
+
+
+def _build_prompt(
+    *,
+    system_prompt: str,
+    query: str,
+    chunks: list[tuple[int, str]],
+    disclaimer: str | None,
+    instructions: list[str],
+) -> list[dict]:
+    parts = [f"Context:\n{_format_chunks(chunks)}", f"Question: {query}", *instructions]
+    disclaimer_instruction = _disclaimer_instruction(disclaimer)
+    if disclaimer_instruction:
+        parts.append(disclaimer_instruction)
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": "\n\n".join(parts)},
+    ]
 
 
 def build_prose_prompt(
@@ -58,15 +90,73 @@ def build_prose_prompt(
     Returns:
         A list of message dictionaries suitable for a chat completion API.
     """
-    # Start with the core context and question.
-    parts = [f"Context:\n{_format_chunks(chunks)}", f"Question: {query}"]
-    
-    # Append a disclaimer instruction if a valid disclaimer key was provided.
-    if disclaimer and disclaimer in DISCLAIMERS:
-        parts.append(f"Prepend this disclaimer to your answer: {DISCLAIMERS[disclaimer]}")
-    
-    # Return the formatted messages following the standard OpenAI/Mistral format.
-    return [
-        {"role": "system", "content": SYSTEM_PROSE},
-        {"role": "user", "content": "\n\n".join(parts)},
-    ]
+    return _build_prompt(
+        system_prompt=SYSTEM_PROSE,
+        query=query,
+        chunks=chunks,
+        disclaimer=disclaimer,
+        instructions=[],
+    )
+
+
+def build_list_prompt(
+    *,
+    query: str,
+    chunks: list[tuple[int, str]],
+    disclaimer: str | None,
+) -> list[dict]:
+    return _build_prompt(
+        system_prompt=SYSTEM_STRUCTURED,
+        query=query,
+        chunks=chunks,
+        disclaimer=disclaimer,
+        instructions=[
+            (
+                'Return JSON with keys: "answer" and "items". '
+                '"answer" must be a bullet list string with inline [n] citations. '
+                '"items" must be an array of objects with keys "text" and "citations".'
+            )
+        ],
+    )
+
+
+def build_table_prompt(
+    *,
+    query: str,
+    chunks: list[tuple[int, str]],
+    disclaimer: str | None,
+) -> list[dict]:
+    return _build_prompt(
+        system_prompt=SYSTEM_STRUCTURED,
+        query=query,
+        chunks=chunks,
+        disclaimer=disclaimer,
+        instructions=[
+            (
+                'Return JSON with keys: "answer" and "rows". '
+                '"answer" must be a markdown table string with inline [n] citations. '
+                '"rows" must be an array of objects with keys "cells" and "citations".'
+            )
+        ],
+    )
+
+
+def build_json_prompt(
+    *,
+    query: str,
+    chunks: list[tuple[int, str]],
+    disclaimer: str | None,
+) -> list[dict]:
+    return _build_prompt(
+        system_prompt=SYSTEM_STRUCTURED,
+        query=query,
+        chunks=chunks,
+        disclaimer=disclaimer,
+        instructions=[
+            (
+                'Return JSON with keys: "answer" and "structured". '
+                '"answer" must be a compact JSON string with inline [n] citations where factual claims appear. '
+                '"structured" must be a JSON object representing the answer.'
+            )
+        ],
+    )

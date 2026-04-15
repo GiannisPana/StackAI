@@ -1,57 +1,29 @@
-"""
-Core generation logic for the StackAI RAG application.
-
-This module handles the interaction with the LLM to generate answers based on
-retrieved context chunks, as well as post-processing of the generated text
-to identify and extract citations.
-"""
+"""Generation helpers for cited answers."""
 
 from __future__ import annotations
 
-import re
+from typing import Literal
 
-from app.generation.templates import build_prose_prompt
+from app.generation.templates import (
+    build_json_prompt,
+    build_list_prompt,
+    build_prose_prompt,
+    build_table_prompt,
+)
+from app.generation.verifier import parse_citation_tags, split_answer_sentences
 from app.mistral_client import MistralProtocol
 
-# Regex for splitting text into sentences, looking for typical sentence endings followed by whitespace and a capital letter.
-SENT_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z(\[])")
-# Regex for identifying citations in the format [n], where n is a number.
-CITE_RE = re.compile(r"\[(\d+)\]")
+Format = Literal["prose", "list", "table", "json"]
 
 
 def split_sentences(text: str) -> list[str]:
-    """
-    Split a block of text into individual sentences.
-
-    Args:
-        text: The raw text string to split.
-
-    Returns:
-        A list of trimmed sentence strings.
-    """
-    text = text.strip()
-    if not text:
-        return []
-    # Split using the predefined regex and filter out any empty results.
-    return [sentence.strip() for sentence in SENT_SPLIT.split(text) if sentence.strip()]
+    """Backwards-compatible wrapper around the shared sentence splitter."""
+    return split_answer_sentences(text)
 
 
 def extract_citations(text: str) -> list[list[int]]:
-    """
-    Extract citation numbers from each sentence in the provided text.
-
-    Args:
-        text: The generated text containing potential [n] citations.
-
-    Returns:
-        A list of lists, where each inner list contains the integer citation
-        indices found in the corresponding sentence.
-    """
-    out: list[list[int]] = []
-    # Process each sentence individually to maintain the sentence-to-citation mapping.
-    for sentence in split_sentences(text):
-        out.append([int(match.group(1)) for match in CITE_RE.finditer(sentence)])
-    return out
+    """Backwards-compatible wrapper around the shared citation parser."""
+    return parse_citation_tags(text)
 
 
 def generate_answer(
@@ -76,11 +48,56 @@ def generate_answer(
     Returns:
         The generated answer as a string.
     """
-    # Construct the messages list for the chat completion.
-    messages = build_prose_prompt(query=query, chunks=chunks, disclaimer=disclaimer)
-    response = client.chat(messages)
-    
-    # Handle different response formats from the client.
-    if isinstance(response, dict):
-        return str(response.get("text", ""))
-    return str(response)
+    answer, _ = generate_shaped_answer(
+        client,
+        query=query,
+        chunks=chunks,
+        format="prose",
+        disclaimer=disclaimer,
+    )
+    return answer
+
+
+def generate_shaped_answer(
+    client: MistralProtocol,
+    *,
+    query: str,
+    chunks: list[tuple[int, str]],
+    format: Format,
+    disclaimer: str | None,
+) -> tuple[str, dict | None]:
+    if format == "prose":
+        messages = build_prose_prompt(query=query, chunks=chunks, disclaimer=disclaimer)
+        response = client.chat(messages)
+        if isinstance(response, dict):
+            return str(response.get("text", "")), None
+        return str(response), None
+
+    if format == "list":
+        messages = build_list_prompt(query=query, chunks=chunks, disclaimer=disclaimer)
+        response = client.chat(messages, response_format={"type": "json_object"})
+        return _parse_structured_response(response, key="items")
+
+    if format == "table":
+        messages = build_table_prompt(query=query, chunks=chunks, disclaimer=disclaimer)
+        response = client.chat(messages, response_format={"type": "json_object"})
+        return _parse_structured_response(response, key="rows")
+
+    messages = build_json_prompt(query=query, chunks=chunks, disclaimer=disclaimer)
+    response = client.chat(messages, response_format={"type": "json_object"})
+    return _parse_structured_response(response, key="structured")
+
+
+def _parse_structured_response(response: object, *, key: str) -> tuple[str, dict | None]:
+    if not isinstance(response, dict):
+        return str(response), None
+
+    answer = response.get("answer")
+    structured = response.get(key)
+    if isinstance(answer, str) and isinstance(structured, (dict, list)):
+        return answer, {key: structured} if key in {"items", "rows"} else structured
+
+    if isinstance(answer, str):
+        return answer, None
+
+    return str(response), None

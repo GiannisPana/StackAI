@@ -48,7 +48,7 @@ class MistralClient:
         embedding_dim: int,
     ):
         """Initializes the Mistral AI client with the provided settings."""
-        from mistralai import Mistral
+        from mistralai.client import Mistral
 
         self._client = Mistral(api_key=api_key)
         self.embedding_model = embedding_model

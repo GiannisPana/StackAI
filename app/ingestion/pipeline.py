@@ -17,7 +17,8 @@ from typing import Any
 from app.config import get_settings
 from app.deps import get_store
 from app.ingestion.chunker import chunk_pages
-from app.ingestion.pdf_parser import parse_pdf, is_low_text_page, PageContent
+from app.ingestion.ocr_fallback import apply_ocr_fallback
+from app.ingestion.pdf_parser import parse_pdf
 from app.mistral_client import MistralProtocol
 from app.retrieval.bm25 import BM25Index
 from app.retrieval.embeddings import embed_texts
@@ -49,48 +50,6 @@ def _cleanup_tmp_files(*paths: object) -> None:
             path.unlink()
         except FileNotFoundError:
             pass
-
-
-def _maybe_ocr_pages(client: MistralProtocol, pdf_bytes: bytes,
-                     pages: list[PageContent]) -> tuple[list[PageContent], int, set[int]]:
-    """Identify low-text pages and process them through OCR if necessary."""
-    low_indices = [i for i, p in enumerate(pages) if is_low_text_page(p)]
-    if not low_indices:
-        return pages, 0, set()
-
-    ocr_text = client.ocr(pdf_bytes).strip()
-    if not ocr_text:
-        return pages, 0, set()
-
-    if len(pages) == 1:
-        page_texts = [ocr_text]
-    else:
-        split_pages = [part.strip() for part in ocr_text.split("\f")]
-        if len(split_pages) == len(pages):
-            page_texts = split_pages
-        elif len(low_indices) == 1:
-            # A single OCR candidate can safely use the flat output.
-            page_texts = [ocr_text if i == low_indices[0] else "" for i in range(len(pages))]
-        else:
-            # Without page boundaries, duplicating the full OCR output onto
-            # multiple pages inflates both BM25 and the vector index.
-            return pages, 0, set()
-
-    new_pages = list(pages)
-    ocr_page_nums = set()
-    for i in low_indices:
-        page_text = page_texts[i].strip()
-        if not page_text:
-            continue
-        from app.ingestion.pdf_parser import Block, PageContent as PC
-        bbox = (0.0, 0.0, 612.0, 792.0) # Default A4
-        new_pages[i] = PC(
-            page_num=pages[i].page_num,
-            blocks=[Block(text=page_text, bbox=bbox, font_size=11.0)],
-            raw_text=page_text,
-        )
-        ocr_page_nums.add(pages[i].page_num)
-    return new_pages, len(ocr_page_nums), ocr_page_nums
 
 
 def _mark_failed(doc_id: int, *, conn: sqlite3.Connection | None = None) -> None:
@@ -136,7 +95,7 @@ def ingest_pdf(client: MistralProtocol, *, filename: str, pdf_bytes: bytes) -> d
     # PHASE 1: Parsing, Chunking and Embedding
     try:
         pages = parse_pdf(pdf_bytes)
-        pages, ocr_pages, ocr_page_nums = _maybe_ocr_pages(client, pdf_bytes, pages)
+        pages, ocr_pages, ocr_page_nums = apply_ocr_fallback(client, pdf_bytes, pages)
         
         chunks = chunk_pages(
             pages,
