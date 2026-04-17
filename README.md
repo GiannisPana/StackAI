@@ -26,7 +26,7 @@ The system has three subsystems: **Ingestion**, **Retrieval**, and **Generation*
 ```mermaid
 flowchart LR
     Upload[POST /ingest\nPDF bytes] --> Parse[PyMuPDF\nlayout-aware\nblock extraction]
-    Parse --> OCR{Blank page?}
+    Parse --> OCR{Low-text page?\n< 50 chars}
     OCR -- yes --> MistralOCR[Mistral OCR\nmistral-ocr-latest]
     OCR -- no --> Chunk
     MistralOCR --> Chunk[Recursive chunker\n512 tok / 64 overlap]
@@ -35,7 +35,7 @@ flowchart LR
     Stage --> Publish[Atomic publish\nready_rows ← new indices]
 ```
 
-**PDF parsing** (`app/ingestion/pdf_parser.py`): PyMuPDF extracts text blocks with bounding boxes. Pages with < 20 characters of text are sent to Mistral OCR.
+**PDF parsing** (`app/ingestion/pdf_parser.py`): PyMuPDF extracts text blocks with bounding boxes. Pages with < 50 characters of extractable text are treated as low-text and sent to Mistral OCR.
 
 **Chunking** (`app/ingestion/chunker.py`): Layout-aware recursive splitter. First splits on double-newlines (paragraph boundaries), then single newlines, then sentences, then words. Chunks are capped at 512 tokens with 64-token overlap to preserve context across boundaries.
 
@@ -120,7 +120,7 @@ curl -X POST http://localhost:8000/query \
 |-------|------|---------|-------------|
 | `query` | string | required | The user question (1–2000 chars) |
 | `top_k` | int | 5 | Chunks to retrieve (1–20) |
-| `format` | string | `"auto"` | `auto` / `prose` |
+| `format` | string | `"auto"` | `auto` / `prose` / `list` / `table` / `json` |
 | `document_ids` | int[] | null | Restrict search to specific document IDs |
 | `enable_llm_rerank` | bool | true | Whether to run LLM reranking |
 
@@ -162,7 +162,7 @@ pytest --cov=app --cov-report=term-missing
 
 The test suite uses `FakeMistralClient` (`tests/fakes/mistral.py`) — a deterministic drop-in that generates stable embeddings from SHA-256 seeds and serves pre-registered chat responses via regex rules. No network access or API key is required.
 
-108 tests across unit and integration suites covering: config, SQLite schema, PDF parser, chunker, BM25, vector index, fusion, MMR, reranker, generator, templates, query transform, ingest pipeline, recovery, and all API endpoints.
+165 tests across unit and integration suites covering: config, SQLite schema, PDF parser, chunker, BM25, vector index, fusion, MMR, reranker, generator, templates, query transform, ingest pipeline, recovery, frontend behavior, and all API endpoints.
 
 ---
 

@@ -23,7 +23,7 @@
       <span class="title-line-2">Archive</span>
     </h1>
     <p class="masthead__sub">
-      <em>A retrieval-augmented reading room</em> &middot; est. MMXXVI &middot; answers cited from your own documents
+      <em>A retrieval-augmented reading room</em> &middot; answers cited from your own documents
     </p>
     <div class="masthead__rail masthead__rail--bottom">
       <span class="rule-label">INGEST · RETRIEVE · CITE</span>
@@ -75,17 +75,21 @@
 
       <form class="ask" id="askForm" autocomplete="off">
         <div class="ask__prompt">&rsaquo;</div>
-        <input
-          type="text"
-          id="q"
-          class="ask__input"
-          placeholder="What does the record say&hellip;"
-          spellcheck="false"
-        >
-        <button class="btn btn--ghost" id="askBtn" type="submit">
-          <span class="btn__label">Ask</span>
-          <span class="btn__key">&crarr;</span>
-        </button>
+        <div class="ask__body">
+          <textarea
+            id="q"
+            class="ask__input"
+            rows="1"
+            placeholder="What does the record say&hellip;"
+            spellcheck="false"
+          ></textarea>
+          <div class="ask__actions">
+            <button class="btn btn--ghost ask__submit" id="askBtn" type="submit">
+              <span class="btn__label">Ask</span>
+              <span class="btn__key">Ctrl/Cmd+Enter</span>
+            </button>
+          </div>
+        </div>
       </form>
 
       <div class="answer-pane" id="answerPane" hidden>
@@ -93,10 +97,21 @@
 
         <article class="folio" id="folio">
           <div class="folio__meta">
-            <span class="rule-label" id="folioIntent">&mdash;</span>
-            <span class="rule-label" id="folioFormat">&mdash;</span>
-            <span class="rule-label" id="folioLatency">&mdash;</span>
+            <div class="folio-meta__item">
+              <span class="folio-meta__label">Intent</span>
+              <span class="folio-meta__value" id="folioIntent">-</span>
+            </div>
+            <div class="folio-meta__item">
+              <span class="folio-meta__label">Format</span>
+              <span class="folio-meta__value" id="folioFormat">-</span>
+            </div>
+            <div class="folio-meta__item">
+              <span class="folio-meta__label">Latency</span>
+              <span class="folio-meta__value" id="folioLatency">-</span>
+            </div>
           </div>
+
+          <div class="folio__notices" id="folioNotices" hidden></div>
 
           <div class="folio__body" id="answer"></div>
 
@@ -127,6 +142,14 @@
     </div>
   </footer>
 
+  <div class="cite-tooltip" id="citeTooltip" hidden>
+    <span class="cite-tooltip__file" id="citeTooltipFile"></span>
+    <span class="cite-tooltip__meta" id="citeTooltipMeta"></span>
+    <p class="cite-tooltip__text" id="citeTooltipText"></p>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>
