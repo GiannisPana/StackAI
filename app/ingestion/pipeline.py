@@ -64,6 +64,14 @@ def _mark_failed(doc_id: int, *, conn: sqlite3.Connection | None = None) -> None
             target.close()
 
 
+def _find_duplicate(conn: sqlite3.Connection, sha: str) -> int | None:
+    """Return an existing ready, non-deleted document id for this content hash."""
+    existing = get_document_by_sha256(conn, sha)
+    if existing is not None and existing.status == "ready" and not existing.is_deleted:
+        return existing.id
+    return None
+
+
 def ingest_pdf(client: MistralProtocol, *, filename: str, pdf_bytes: bytes) -> dict[str, Any]:
     """
     Main entry point for document ingestion.
@@ -81,12 +89,12 @@ def ingest_pdf(client: MistralProtocol, *, filename: str, pdf_bytes: bytes) -> d
     # PHASE 0: Deduplication check
     conn = get_connection()
     try:
-        existing = get_document_by_sha256(conn, sha)
-        if existing is not None and existing.status == "ready" and not existing.is_deleted:
+        duplicate_id = _find_duplicate(conn, sha)
+        if duplicate_id is not None:
             return {
                 "status": "skipped",
                 "reason": "already ingested",
-                "document_id": existing.id,
+                "document_id": duplicate_id,
                 "filename": filename,
             }
     finally:
@@ -101,18 +109,11 @@ def ingest_pdf(client: MistralProtocol, *, filename: str, pdf_bytes: bytes) -> d
             pages,
             max_tokens=settings.max_tokens_per_chunk,
             overlap=settings.chunk_overlap_tokens,
+            ocr_pages=ocr_page_nums,
         )
         
         if not chunks:
             return {"status": "failed", "reason": "no extractable text", "filename": filename}
-
-        # Mark OCR-sourced chunks
-        if ocr_page_nums:
-            from dataclasses import replace
-            chunks = [
-                replace(c, source="ocr") if c.page in ocr_page_nums else c 
-                for c in chunks
-            ]
             
         embeddings = embed_texts(client, [chunk.text for chunk in chunks])
     except Exception as exc:
@@ -122,12 +123,13 @@ def ingest_pdf(client: MistralProtocol, *, filename: str, pdf_bytes: bytes) -> d
     with store.writer_lock:
         conn = get_connection()
         try:
-            existing = get_document_by_sha256(conn, sha)
-            if existing is not None and existing.status == "ready" and not existing.is_deleted:
+            # Re-check under the writer lock to close the parse-before-publish race.
+            duplicate_id = _find_duplicate(conn, sha)
+            if duplicate_id is not None:
                 return {
                     "status": "skipped",
                     "reason": "already ingested",
-                    "document_id": existing.id,
+                    "document_id": duplicate_id,
                     "filename": filename,
                 }
 

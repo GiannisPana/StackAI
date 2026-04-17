@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import Literal
 
 from app.mistral_client import MistralProtocol
+
+logger = logging.getLogger(__name__)
 
 _EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
 _SSN_RE = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
@@ -148,7 +151,8 @@ def _fallback_action(
     ]
     try:
         response = client.chat(messages, response_format={"type": "json_object"})
-    except Exception:
+    except Exception as exc:
+        logger.warning("policy LLM fallback failed: %s", exc)
         return "DISCLAIMER"
 
     if not isinstance(response, dict):
@@ -186,6 +190,7 @@ def _mask_credit_cards(text: str, entities: list[str]) -> str:
 
 
 def _passes_luhn(digits: str) -> bool:
+    # Luhn mod-10 checksum used by credit-card numbers.
     total = 0
     parity = len(digits) % 2
     for index, char in enumerate(digits):
@@ -199,6 +204,7 @@ def _passes_luhn(digits: str) -> bool:
 
 
 def _valid_iban(value: str) -> bool:
+    # ISO-7064 IBAN mod-97 check after alphanumeric remapping.
     if len(value) < 15 or len(value) > 34:
         return False
     rearranged = value[4:] + value[:4]

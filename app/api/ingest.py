@@ -14,13 +14,11 @@ from fastapi import APIRouter, File, UploadFile
 from fastapi.responses import JSONResponse
 
 from app.api.schemas import IngestResponse, IngestResultItem
+from app.config import get_settings
 from app.ingestion.pipeline import ingest_pdf
 from app.mistral_client import get_mistral_client
 
 router = APIRouter()
-
-# Max allowed size for a single PDF upload (25MB).
-MAX_PDF_BYTES = 25 * 1024 * 1024
 
 
 @router.post("/ingest", response_model=IngestResponse)
@@ -38,6 +36,7 @@ async def ingest_endpoint(files: list[UploadFile] = File(...)) -> IngestResponse
         An IngestResponse containing the status of each processed file.
         Returns a 400 JSONResponse if no valid PDFs were found in the request.
     """
+    settings = get_settings()
     client = get_mistral_client()
     response = IngestResponse()
     saw_pdf_candidate = False
@@ -65,12 +64,12 @@ async def ingest_endpoint(files: list[UploadFile] = File(...)) -> IngestResponse
         saw_pdf_candidate = True
 
         # Check file size against the limit.
-        if len(data) > MAX_PDF_BYTES:
+        if len(data) > settings.max_pdf_bytes:
             response.failed.append(
                 IngestResultItem(
                     filename=name,
                     status="failed",
-                    reason=f"file exceeds {MAX_PDF_BYTES} byte limit",
+                    reason=f"file exceeds {settings.max_pdf_bytes} byte limit",
                 )
             )
             continue

@@ -58,25 +58,27 @@ def hybrid_retrieve(
         A list of hybrid candidates, sorted by RRF score descending.
     """
     store = get_store()
-    # Apply global document status mask (e.g., exclude documents being deleted)
+    # `mask` is the caller's scoping filter (e.g. specific doc IDs, or None for "all").
+    # `active_rows` is the global "ready & not soft-deleted" set from the store.
+    # Effective search set is their intersection.
     effective_mask = active_rows if mask is None else (mask & active_rows)
 
     all_queries = [query] + list(expansion_queries or [])
     rankings: list[list[tuple[int, float]]] = []
 
     for q in all_queries:
-        # Vector retrieval for this query
+        # Vector over base+expansions.
         qvec = client.embed(q)
         rankings.append(
             vector_top_k(store.embeddings, qvec, k=per_query_k, mask=effective_mask)
         )
-        # BM25 retrieval for this query
+        # BM25 over base+expansions.
         if store.bm25:
             rankings.append(
                 store.bm25.top_k(tokenize(q), k=per_query_k, mask=effective_mask)
             )
 
-    # Extra pre-computed vectors (e.g. HyDE embedding) — vector search only
+    # Extra pre-computed vectors (HyDE).
     for vec in (extra_vectors or []):
         rankings.append(
             vector_top_k(store.embeddings, vec, k=per_query_k, mask=effective_mask)

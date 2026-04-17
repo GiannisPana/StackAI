@@ -25,7 +25,7 @@ import time
 import numpy as np
 from fastapi import APIRouter, HTTPException
 
-from app.api.schemas import Citation, DebugInfo, PolicyInfo, QueryRequest, QueryResponse
+from app.api.schemas import Citation, DebugInfo, PolicyInfo, QueryRequest, QueryResponse, Verification
 from app.config import get_settings
 from app.deps import get_store
 from app.generation.generator import generate_shaped_answer
@@ -73,6 +73,13 @@ def _load_chunks(rows: list[int]) -> dict[int, dict]:
     finally:
         conn.close()
     return {int(row["embedding_row"]): dict(row) for row in results}
+
+
+def _load_chunk_texts(rows: list[int]) -> tuple[dict[int, dict], dict[int, str]]:
+    """Load chunk metadata and the plain-text lookup used by rerank prompts."""
+    chunks_by_row = _load_chunks(rows)
+    chunk_texts = {row: str(chunks_by_row[row]["text"]) for row in rows if row in chunks_by_row}
+    return chunks_by_row, chunk_texts
 
 
 def _threshold_passed(
@@ -143,6 +150,124 @@ def _resolve_output_format(requested: str, sub_intent: str | None) -> str:
     return "prose"
 
 
+def _build_response(
+    *,
+    answer: str,
+    intent: str,
+    policy_info: PolicyInfo,
+    warnings: list[str],
+    timings: dict[str, int],
+    t0: float,
+    settings,
+    format: str = "prose",
+    sub_intent: str | None = None,
+    refusal_reason: str | None = None,
+    citations: list[Citation] | None = None,
+    structured: dict | None = None,
+    verification: Verification | None = None,
+    debug_extra: dict | None = None,
+) -> QueryResponse:
+    """Build a consistent QueryResponse for both short-circuit and success paths."""
+    debug = None
+    if settings.debug:
+        debug = DebugInfo(
+            latency_ms=timings | {"total": int((time.monotonic() - t0) * 1000)},
+            **(debug_extra or {}),
+        )
+
+    payload = {
+        "answer": _apply_disclaimer(answer, policy_info.disclaimer),
+        "format": format,
+        "intent": intent,
+        "sub_intent": sub_intent,
+        "refusal_reason": refusal_reason,
+        "citations": citations or [],
+        "policy": policy_info,
+        "warnings": warnings,
+        "debug": debug,
+    }
+    if structured is not None:
+        payload["structured"] = structured
+    if verification is not None:
+        payload["verification"] = verification
+    return QueryResponse(**payload)
+
+
+def _maybe_hyde_rerank(
+    client,
+    *,
+    retrieval_query: str,
+    candidates: list[Candidate],
+    rerank_window: list[Candidate],
+    mask: set[int] | None,
+    active_rows: set[int],
+    expansion_queries: list[str] | None,
+    enable_rerank: bool,
+    threshold_low: float,
+    timings: dict[str, int],
+) -> tuple[list[Candidate], list[Candidate], bool]:
+    """Retry retrieval with a HyDE vector when the top rerank score is weak."""
+    if not (enable_rerank and rerank_window and rerank_window[0].score < threshold_low):
+        return candidates, rerank_window, False
+
+    hyde_start = time.monotonic()
+    refreshed_candidates = candidates
+    refreshed_window = rerank_window
+    used_hyde = False
+
+    hypothetical = hyde_expand(client, retrieval_query)
+    if hypothetical:
+        hyde_vec = client.embed(hypothetical)
+        refreshed_candidates = hybrid_retrieve(
+            client,
+            query=retrieval_query,
+            mask=mask,
+            active_rows=active_rows,
+            expansion_queries=expansion_queries,
+            extra_vectors=[hyde_vec],
+        )
+        refreshed_window = refreshed_candidates[:_RERANK_WINDOW]
+        _, chunk_texts = _load_chunk_texts([candidate.row for candidate in refreshed_window])
+        if chunk_texts:
+            refreshed_window = llm_rerank(
+                client,
+                query=retrieval_query,
+                candidates=refreshed_window,
+                chunk_texts=chunk_texts,
+            )
+        used_hyde = True
+
+    timings["hyde"] = int((time.monotonic() - hyde_start) * 1000)
+    return refreshed_candidates, refreshed_window, used_hyde
+
+
+def _build_citations(
+    *,
+    final_rows: list[int],
+    chunks_by_row: dict[int, dict],
+    candidates: list[Candidate],
+) -> list[Citation]:
+    """Map the final ranked rows into the API citation payload."""
+    scores_by_row = {candidate.row: candidate.score for candidate in candidates}
+    citations: list[Citation] = []
+    for index, row in enumerate(final_rows, start=1):
+        chunk = chunks_by_row.get(row)
+        if chunk is None:
+            continue
+        citations.append(
+            Citation(
+                index=index,
+                document_id=int(chunk["doc_id"]),
+                filename=str(chunk["filename"]),
+                page=int(chunk["page"]),
+                chunk_id=int(chunk["id"]),
+                text=str(chunk["text"]),
+                score=float(scores_by_row[row]),
+            )
+        )
+    return citations
+
+
 @router.post("/query", response_model=QueryResponse)
 def query_endpoint(req: QueryRequest) -> QueryResponse:
     """
@@ -182,23 +307,19 @@ def query_endpoint(req: QueryRequest) -> QueryResponse:
     )
 
     if policy.refuse_reason is not None:
-        return QueryResponse(
-            answer=_apply_disclaimer(
+        return _build_response(
+            answer=(
                 "I can't provide personal advice on this topic. "
-                "I can summarise what the uploaded documents say about it if you'd like.",
-                policy.disclaimer,
+                "I can summarise what the uploaded documents say about it if you'd like."
             ),
-            format=response_format,
             intent="refuse",
-            refusal_reason=policy.refuse_reason,
-            citations=[],
+            policy_info=policy_info,
             warnings=warnings,
-            policy=policy_info,
-            debug=DebugInfo(
-                latency_ms={"total": int((time.monotonic() - t0) * 1000)},
-            )
-            if settings.debug
-            else None,
+            timings=timings,
+            t0=t0,
+            settings=settings,
+            format=response_format,
+            refusal_reason=policy.refuse_reason,
         )
 
     # ------------------------------------------------------------------
@@ -210,43 +331,40 @@ def query_endpoint(req: QueryRequest) -> QueryResponse:
 
     # Short-circuit: greetings and chit-chat — no retrieval needed.
     if transform.intent == "no_search":
-        return QueryResponse(
-            answer=_apply_disclaimer(
-                "Hello! Ask me anything about your uploaded documents.",
-                policy.disclaimer,
-            ),
-            format=response_format,
+        return _build_response(
+            answer="Hello! Ask me anything about your uploaded documents.",
             intent="no_search",
-            sub_intent=transform.sub_intent,
+            policy_info=policy_info,
             warnings=warnings,
-            policy=policy_info,
-            debug=DebugInfo(
-                rewritten_query=transform.rewritten_query,
-                latency_ms=timings | {"total": int((time.monotonic() - t0) * 1000)},
-            )
-            if settings.debug
-            else None,
+            timings=timings,
+            t0=t0,
+            settings=settings,
+            format=response_format,
+            sub_intent=transform.sub_intent,
+            debug_extra={
+                "rewritten_query": transform.rewritten_query,
+            },
         )
 
     # Short-circuit: personalised legal / medical advice — policy refusal.
     if transform.intent == "refuse":
-        return QueryResponse(
-            answer=_apply_disclaimer(
+        return _build_response(
+            answer=(
                 "I can't provide personal advice on this topic. "
                 "I can summarise what the uploaded documents say about it if you'd like."
-            , policy.disclaimer),
-            format=response_format,
+            ),
             intent="refuse",
+            policy_info=policy_info,
+            warnings=warnings,
+            timings=timings,
+            t0=t0,
+            settings=settings,
+            format=response_format,
             sub_intent=transform.sub_intent,
             refusal_reason=policy.refuse_reason or "personalized_advice",
-            warnings=warnings,
-            policy=policy_info,
-            debug=DebugInfo(
-                rewritten_query=transform.rewritten_query,
-                latency_ms=timings | {"total": int((time.monotonic() - t0) * 1000)},
-            )
-            if settings.debug
-            else None,
+            debug_extra={
+                "rewritten_query": transform.rewritten_query,
+            },
         )
 
     # ------------------------------------------------------------------
@@ -291,27 +409,23 @@ def query_endpoint(req: QueryRequest) -> QueryResponse:
     timings["retrieve"] = int((time.monotonic() - retrieve_start) * 1000)
 
     if not candidates:
-        return QueryResponse(
-            answer=_apply_disclaimer(
-                "I don't have sufficient evidence in the indexed documents to answer this question.",
-                policy.disclaimer,
-            ),
-            format=response_format,
+        return _build_response(
+            answer="I don't have sufficient evidence in the indexed documents to answer this question.",
             intent="search",
+            policy_info=policy_info,
+            warnings=warnings,
+            timings=timings,
+            t0=t0,
+            settings=settings,
+            format=response_format,
             sub_intent=transform.sub_intent,
             refusal_reason="insufficient_evidence",
-            citations=[],
-            warnings=warnings,
-            policy=policy_info,
-            debug=DebugInfo(
-                rewritten_query=transform.rewritten_query,
-                expansion_queries=transform.expansion_queries,
-                num_candidates=0,
-                threshold=settings.threshold_high,
-                latency_ms=timings | {"total": int((time.monotonic() - t0) * 1000)},
-            )
-            if settings.debug
-            else None,
+            debug_extra={
+                "rewritten_query": transform.rewritten_query,
+                "expansion_queries": transform.expansion_queries,
+                "num_candidates": 0,
+                "threshold": settings.threshold_high,
+            },
         )
 
     # ------------------------------------------------------------------
@@ -321,8 +435,7 @@ def query_endpoint(req: QueryRequest) -> QueryResponse:
 
     # Pre-load chunk texts needed for the rerank prompt.
     rerank_rows = [c.row for c in rerank_window]
-    chunks_by_row = _load_chunks(rerank_rows)
-    chunk_texts = {r: chunks_by_row[r]["text"] for r in rerank_rows if r in chunks_by_row}
+    _, chunk_texts = _load_chunk_texts(rerank_rows)
 
     if req.enable_llm_rerank and chunk_texts:
         rerank_start = time.monotonic()
@@ -338,38 +451,18 @@ def query_endpoint(req: QueryRequest) -> QueryResponse:
     # HyDE fallback — fires post-rerank when top rerank score is weak.
     # Uses normalised rerank scores (0..1), not pre-fusion RRF scores.
     # ------------------------------------------------------------------
-    used_hyde = False
-    if (
-        req.enable_llm_rerank
-        and rerank_window
-        and rerank_window[0].score < settings.threshold_low
-    ):
-        hyde_start = time.monotonic()
-        hypothetical = hyde_expand(client, retrieval_query)
-        if hypothetical:
-            hyde_vec = client.embed(hypothetical)
-            candidates = hybrid_retrieve(
-                client,
-                query=retrieval_query,
-                mask=mask,
-                active_rows=active_rows,
-                expansion_queries=transform.expansion_queries or None,
-                extra_vectors=[hyde_vec],
-            )
-            # Re-run rerank on the refreshed candidate set
-            rerank_window = candidates[:_RERANK_WINDOW]
-            rerank_rows = [c.row for c in rerank_window]
-            chunks_by_row = _load_chunks(rerank_rows)
-            chunk_texts = {r: chunks_by_row[r]["text"] for r in rerank_rows if r in chunks_by_row}
-            if chunk_texts:
-                rerank_window = llm_rerank(
-                    client,
-                    query=retrieval_query,
-                    candidates=rerank_window,
-                    chunk_texts=chunk_texts,
-                )
-            used_hyde = True
-        timings["hyde"] = int((time.monotonic() - hyde_start) * 1000)
+    candidates, rerank_window, used_hyde = _maybe_hyde_rerank(
+        client,
+        retrieval_query=retrieval_query,
+        candidates=candidates,
+        rerank_window=rerank_window,
+        mask=mask,
+        active_rows=active_rows,
+        expansion_queries=transform.expansion_queries or None,
+        enable_rerank=req.enable_llm_rerank,
+        threshold_low=settings.threshold_low,
+        timings=timings,
+    )
 
     # Threshold gate — refuse if evidence quality is too low.
     passed, top_score = _threshold_passed(
@@ -378,29 +471,25 @@ def query_endpoint(req: QueryRequest) -> QueryResponse:
         spread_min=settings.spread_min,
     )
     if not passed:
-        return QueryResponse(
-            answer=_apply_disclaimer(
-                "I don't have sufficient evidence in the indexed documents to answer this question.",
-                policy.disclaimer,
-            ),
-            format=response_format,
+        return _build_response(
+            answer="I don't have sufficient evidence in the indexed documents to answer this question.",
             intent="search",
+            policy_info=policy_info,
+            warnings=warnings,
+            timings=timings,
+            t0=t0,
+            settings=settings,
+            format=response_format,
             sub_intent=transform.sub_intent,
             refusal_reason="insufficient_evidence",
-            citations=[],
-            warnings=warnings,
-            policy=policy_info,
-            debug=DebugInfo(
-                rewritten_query=transform.rewritten_query,
-                expansion_queries=transform.expansion_queries,
-                used_hyde=used_hyde,
-                num_candidates=len(candidates),
-                top_score=float(top_score),
-                threshold=settings.threshold_high,
-                latency_ms=timings | {"total": int((time.monotonic() - t0) * 1000)},
-            )
-            if settings.debug
-            else None,
+            debug_extra={
+                "rewritten_query": transform.rewritten_query,
+                "expansion_queries": transform.expansion_queries,
+                "used_hyde": used_hyde,
+                "num_candidates": len(candidates),
+                "top_score": float(top_score),
+                "threshold": settings.threshold_high,
+            },
         )
 
     # ------------------------------------------------------------------
@@ -422,7 +511,7 @@ def query_endpoint(req: QueryRequest) -> QueryResponse:
 
     # Refetch chunk metadata for the final top set (may differ from rerank window).
     final_rows = [c.row for c in top]
-    chunks_by_row = _load_chunks(final_rows)
+    chunks_by_row, _ = _load_chunk_texts(final_rows)
 
     # ------------------------------------------------------------------
     # Step 7: Generate the answer.
@@ -442,6 +531,8 @@ def query_endpoint(req: QueryRequest) -> QueryResponse:
         disclaimer=policy.disclaimer,
     )
     timings["generate"] = int((time.monotonic() - generate_start) * 1000)
+    # Apply disclaimer before verification so sentence indexes in
+    # verification.unsupported_sentences match the string the client receives.
     answer = _apply_disclaimer(answer, policy.disclaimer)
     chunk_lookup = {index: text for index, text in numbered}
     verify_start = time.monotonic()
@@ -451,43 +542,31 @@ def query_endpoint(req: QueryRequest) -> QueryResponse:
     # ------------------------------------------------------------------
     # Step 8: Map citations into the response payload.
     # ------------------------------------------------------------------
-    citations: list[Citation] = []
-    for index, row in enumerate(final_rows, start=1):
-        chunk = chunks_by_row.get(row)
-        if chunk is None:
-            continue
-        score = next(c.score for c in top if c.row == row)
-        citations.append(
-            Citation(
-                index=index,
-                document_id=int(chunk["doc_id"]),
-                filename=str(chunk["filename"]),
-                page=int(chunk["page"]),
-                chunk_id=int(chunk["id"]),
-                text=str(chunk["text"]),
-                score=float(score),
-            )
-        )
+    citations = _build_citations(
+        final_rows=final_rows,
+        chunks_by_row=chunks_by_row,
+        candidates=top,
+    )
 
-    return QueryResponse(
+    return _build_response(
         answer=answer,
-        format=response_format,
         intent="search",
+        policy_info=policy_info,
+        warnings=warnings,
+        timings=timings,
+        t0=t0,
+        settings=settings,
+        format=response_format,
         sub_intent=transform.sub_intent,
         citations=citations,
         structured=structured,
         verification=verification,
-        policy=policy_info,
-        warnings=warnings,
-        debug=DebugInfo(
-            rewritten_query=transform.rewritten_query,
-            expansion_queries=transform.expansion_queries,
-            used_hyde=used_hyde,
-            num_candidates=len(candidates),
-            top_score=float(top[0].score),
-            threshold=settings.threshold_high,
-            latency_ms=timings | {"total": int((time.monotonic() - t0) * 1000)},
-        )
-        if settings.debug
-        else None,
+        debug_extra={
+            "rewritten_query": transform.rewritten_query,
+            "expansion_queries": transform.expansion_queries,
+            "used_hyde": used_hyde,
+            "num_candidates": len(candidates),
+            "top_score": float(top[0].score),
+            "threshold": settings.threshold_high,
+        },
     )

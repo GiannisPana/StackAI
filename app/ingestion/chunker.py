@@ -110,7 +110,12 @@ def _split_with_cap(text: str, max_tokens: int, overlap: int) -> list[str]:
     return output
 
 
-def chunk_pages(pages: list[PageContent], max_tokens: int, overlap: int) -> list[Chunk]:
+def chunk_pages(
+    pages: list[PageContent],
+    max_tokens: int,
+    overlap: int,
+    ocr_pages: set[int] | None = None,
+) -> list[Chunk]:
     """
     Process a list of pages and return a flat list of chunks.
 
@@ -118,6 +123,7 @@ def chunk_pages(pages: list[PageContent], max_tokens: int, overlap: int) -> list
     splitting them into token-capped windows.
     """
     chunks: list[Chunk] = []
+    ocr_page_nums = ocr_pages or set()
 
     for page in pages:
         # Grouping by heading helps keep related information in the same chunk.
@@ -138,7 +144,7 @@ def chunk_pages(pages: list[PageContent], max_tokens: int, overlap: int) -> list
                         text=part,
                         token_count=_approx_tokens(part),
                         bbox=bbox,
-                        source="pdf_text",
+                        source="ocr" if page.page_num in ocr_page_nums else "pdf_text",
                     )
                 )
 

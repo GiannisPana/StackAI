@@ -9,10 +9,12 @@ from app.mistral_client import MistralProtocol
 
 _ABBREVIATIONS = {"dr", "mr", "mrs", "ms", "prof", "sr", "jr", "vs", "etc"}
 _CITATION_GROUP_RE = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
-_NON_CITATION_TEXT_RE = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
 
 
 def split_answer_sentences(text: str) -> list[str]:
+    # Splits on .!? but (a) keeps known abbreviations like "Dr." attached to the
+    # previous clause, and (b) requires the next non-space char to look like a
+    # sentence start (uppercase/digit/bracket) to avoid false breaks mid-sentence.
     normalized = " ".join(text.strip().split())
     if not normalized:
         return []
@@ -54,10 +56,7 @@ def split_answer_sentences(text: str) -> list[str]:
 def parse_citation_tags(text: str) -> list[list[int]]:
     citations_per_sentence: list[list[int]] = []
     for sentence in split_answer_sentences(text):
-        citations: list[int] = []
-        for match in _CITATION_GROUP_RE.finditer(sentence):
-            citations.extend(int(part.strip()) for part in match.group(1).split(","))
-        citations_per_sentence.append(citations)
+        citations_per_sentence.append(_citations_in_sentence(sentence))
     return citations_per_sentence
 
 
@@ -78,7 +77,7 @@ def verify_answer(
         if index < ignored_prefix_count:
             continue
 
-        citations = parse_citation_tags(sentence)[0]
+        citations = _citations_in_sentence(sentence)
         if not citations:
             if _looks_factual(sentence):
                 unsupported.add(index)
@@ -137,7 +136,15 @@ def _looks_factual(sentence: str) -> bool:
 
 
 def _strip_citations(sentence: str) -> str:
-    return " ".join(_NON_CITATION_TEXT_RE.sub("", sentence).split())
+    return " ".join(_CITATION_GROUP_RE.sub("", sentence).split())
+
+
+def _citations_in_sentence(sentence: str) -> list[int]:
+    return [
+        int(part.strip())
+        for match in _CITATION_GROUP_RE.finditer(sentence)
+        for part in match.group(1).split(",")
+    ]
 
 
 def _batched_entailment(
@@ -145,6 +152,7 @@ def _batched_entailment(
     cited_sentences: list[tuple[int, str, list[int]]],
     chunk_lookup: dict[int, str],
 ) -> dict[int, bool]:
+    """Score all (sentence, cited_chunk) pairs in one LLM call and accept a sentence if any pair is supported."""
     if not cited_sentences:
         return {}
 
@@ -154,11 +162,11 @@ def _batched_entailment(
         "Return STRICT JSON mapping each pair id to true or false.",
     ]
 
-    pair_id = 0
+    pair_index = 0
     for sentence_index, sentence, citations in cited_sentences:
         cleaned_sentence = _strip_citations(sentence)
         for citation in citations:
-            key = str(pair_id)
+            key = str(pair_index)
             pair_to_sentence[key] = sentence_index
             prompt_lines.extend(
                 [
@@ -167,7 +175,7 @@ def _batched_entailment(
                     f"context: {chunk_lookup[citation]}",
                 ]
             )
-            pair_id += 1
+            pair_index += 1
 
     messages = [
         {

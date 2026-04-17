@@ -35,6 +35,49 @@ SYSTEM_STRUCTURED = (
     "inline [n] citations that refer to the provided chunk numbers."
 )
 
+Format = Literal["prose", "list", "table", "json"]
+
+_FORMAT_SPEC: dict[Format, dict[str, object]] = {
+    "prose": {
+        "system_prompt": SYSTEM_PROSE,
+        "instructions": [],
+        "response_format": None,
+    },
+    "list": {
+        "system_prompt": SYSTEM_STRUCTURED,
+        "instructions": [
+            (
+                'Return JSON with keys: "answer" and "items". '
+                '"answer" must be a bullet list string with inline [n] citations. '
+                '"items" must be an array of objects with keys "text" and "citations".'
+            )
+        ],
+        "response_format": {"type": "json_object"},
+    },
+    "table": {
+        "system_prompt": SYSTEM_STRUCTURED,
+        "instructions": [
+            (
+                'Return JSON with keys: "answer" and "rows". '
+                '"answer" must be a markdown table string with inline [n] citations. '
+                '"rows" must be an array of objects with keys "cells" and "citations".'
+            )
+        ],
+        "response_format": {"type": "json_object"},
+    },
+    "json": {
+        "system_prompt": SYSTEM_STRUCTURED,
+        "instructions": [
+            (
+                'Return JSON with keys: "answer" and "structured". '
+                '"answer" must be a compact JSON string with inline [n] citations where factual claims appear. '
+                '"structured" must be a JSON object representing the answer.'
+            )
+        ],
+        "response_format": {"type": "json_object"},
+    },
+}
+
 
 def _format_chunks(chunks: list[tuple[int, str]]) -> str:
     """
@@ -55,108 +98,32 @@ def _disclaimer_instruction(disclaimer: str | None) -> str | None:
     return None
 
 
-def _build_prompt(
+def build_prompt(
     *,
-    system_prompt: str,
+    format: Format,
     query: str,
     chunks: list[tuple[int, str]],
     disclaimer: str | None,
-    instructions: list[str],
-) -> list[dict]:
+) -> tuple[list[dict], dict | None]:
+    """
+    Build prompt messages and the optional response_format for a named output shape.
+
+    Supported formats:
+    - ``prose``: free-form cited answer
+    - ``list``: JSON object with ``answer`` and ``items``
+    - ``table``: JSON object with ``answer`` and ``rows``
+    - ``json``: JSON object with ``answer`` and ``structured``
+    """
+    spec = _FORMAT_SPEC[format]
+    instructions = list(spec["instructions"])
     parts = [f"Context:\n{_format_chunks(chunks)}", f"Question: {query}", *instructions]
     disclaimer_instruction = _disclaimer_instruction(disclaimer)
     if disclaimer_instruction:
         parts.append(disclaimer_instruction)
-    return [
-        {"role": "system", "content": system_prompt},
+
+    messages = [
+        {"role": "system", "content": str(spec["system_prompt"])},
         {"role": "user", "content": "\n\n".join(parts)},
     ]
-
-
-def build_prose_prompt(
-    *,
-    query: str,
-    chunks: list[tuple[int, str]],
-    disclaimer: str | None,
-) -> list[dict]:
-    """
-    Construct the messages for a prose-based RAG prompt.
-
-    Args:
-        query: The user's query.
-        chunks: The retrieved context chunks as (index, text) tuples.
-        disclaimer: Optional key for a domain-specific disclaimer.
-
-    Returns:
-        A list of message dictionaries suitable for a chat completion API.
-    """
-    return _build_prompt(
-        system_prompt=SYSTEM_PROSE,
-        query=query,
-        chunks=chunks,
-        disclaimer=disclaimer,
-        instructions=[],
-    )
-
-
-def build_list_prompt(
-    *,
-    query: str,
-    chunks: list[tuple[int, str]],
-    disclaimer: str | None,
-) -> list[dict]:
-    return _build_prompt(
-        system_prompt=SYSTEM_STRUCTURED,
-        query=query,
-        chunks=chunks,
-        disclaimer=disclaimer,
-        instructions=[
-            (
-                'Return JSON with keys: "answer" and "items". '
-                '"answer" must be a bullet list string with inline [n] citations. '
-                '"items" must be an array of objects with keys "text" and "citations".'
-            )
-        ],
-    )
-
-
-def build_table_prompt(
-    *,
-    query: str,
-    chunks: list[tuple[int, str]],
-    disclaimer: str | None,
-) -> list[dict]:
-    return _build_prompt(
-        system_prompt=SYSTEM_STRUCTURED,
-        query=query,
-        chunks=chunks,
-        disclaimer=disclaimer,
-        instructions=[
-            (
-                'Return JSON with keys: "answer" and "rows". '
-                '"answer" must be a markdown table string with inline [n] citations. '
-                '"rows" must be an array of objects with keys "cells" and "citations".'
-            )
-        ],
-    )
-
-
-def build_json_prompt(
-    *,
-    query: str,
-    chunks: list[tuple[int, str]],
-    disclaimer: str | None,
-) -> list[dict]:
-    return _build_prompt(
-        system_prompt=SYSTEM_STRUCTURED,
-        query=query,
-        chunks=chunks,
-        disclaimer=disclaimer,
-        instructions=[
-            (
-                'Return JSON with keys: "answer" and "structured". '
-                '"answer" must be a compact JSON string with inline [n] citations where factual claims appear. '
-                '"structured" must be a JSON object representing the answer.'
-            )
-        ],
-    )
+    response_format = spec["response_format"]
+    return messages, response_format if isinstance(response_format, dict) else None

@@ -4,26 +4,16 @@ from __future__ import annotations
 
 from typing import Literal
 
-from app.generation.templates import (
-    build_json_prompt,
-    build_list_prompt,
-    build_prose_prompt,
-    build_table_prompt,
-)
-from app.generation.verifier import parse_citation_tags, split_answer_sentences
+from app.generation.templates import build_prompt
 from app.mistral_client import MistralProtocol
 
 Format = Literal["prose", "list", "table", "json"]
-
-
-def split_sentences(text: str) -> list[str]:
-    """Backwards-compatible wrapper around the shared sentence splitter."""
-    return split_answer_sentences(text)
-
-
-def extract_citations(text: str) -> list[list[int]]:
-    """Backwards-compatible wrapper around the shared citation parser."""
-    return parse_citation_tags(text)
+_STRUCTURED_KEYS: dict[Format, str | None] = {
+    "prose": None,
+    "list": "items",
+    "table": "rows",
+    "json": "structured",
+}
 
 
 def generate_answer(
@@ -66,26 +56,19 @@ def generate_shaped_answer(
     format: Format,
     disclaimer: str | None,
 ) -> tuple[str, dict | None]:
-    if format == "prose":
-        messages = build_prose_prompt(query=query, chunks=chunks, disclaimer=disclaimer)
-        response = client.chat(messages)
+    messages, response_format = build_prompt(
+        format=format,
+        query=query,
+        chunks=chunks,
+        disclaimer=disclaimer,
+    )
+    response = client.chat(messages, response_format=response_format)
+    structured_key = _STRUCTURED_KEYS[format]
+    if structured_key is None:
         if isinstance(response, dict):
             return str(response.get("text", "")), None
         return str(response), None
-
-    if format == "list":
-        messages = build_list_prompt(query=query, chunks=chunks, disclaimer=disclaimer)
-        response = client.chat(messages, response_format={"type": "json_object"})
-        return _parse_structured_response(response, key="items")
-
-    if format == "table":
-        messages = build_table_prompt(query=query, chunks=chunks, disclaimer=disclaimer)
-        response = client.chat(messages, response_format={"type": "json_object"})
-        return _parse_structured_response(response, key="rows")
-
-    messages = build_json_prompt(query=query, chunks=chunks, disclaimer=disclaimer)
-    response = client.chat(messages, response_format={"type": "json_object"})
-    return _parse_structured_response(response, key="structured")
+    return _parse_structured_response(response, key=structured_key)
 
 
 def _parse_structured_response(response: object, *, key: str) -> tuple[str, dict | None]:
