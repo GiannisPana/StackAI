@@ -140,7 +140,7 @@ def test_section_title_carries_forward_across_pages():
     chunks = chunk_pages([page1, page2], max_tokens=100, overlap=0)
 
     assert [getattr(chunk, "section_title", None) for chunk in chunks] == [
-        "INSURANCE",
+        None,
         "INSURANCE",
     ]
 
@@ -150,7 +150,7 @@ def test_last_heading_wins_for_subsection_chunks():
     The most recent detected heading should override an earlier one even when
     it uses a smaller font, as long as it still counts as a heading.
     """
-    page = _page(
+    page1 = _page(
         1,
         [
             ("INSURANCE", 24),
@@ -159,14 +159,17 @@ def test_last_heading_wins_for_subsection_chunks():
             ("subcontractor body", 11),
         ],
     )
+    page2 = _page(2, [("continued subcontractor body", 11)])
 
-    chunks = chunk_pages([page], max_tokens=100, overlap=0)
+    chunks = chunk_pages([page1, page2], max_tokens=100, overlap=0)
 
     assert [chunk.text for chunk in chunks] == [
         "INSURANCE general body",
         "6.B Subcontractor Coverage subcontractor body",
+        "continued subcontractor body",
     ]
     assert [getattr(chunk, "section_title", None) for chunk in chunks] == [
+        None,
         "INSURANCE",
         "6.B Subcontractor Coverage",
     ]
@@ -198,3 +201,7 @@ def test_indexed_text_prefixes_section_title_only_when_present():
 
     assert chunker.indexed_text(titled) == "INSURANCE\n\nforegoing provisions"
     assert chunker.indexed_text(untitled) == "plain text"
+    assert (
+        chunker.indexed_text_from_parts("foregoing provisions", "INSURANCE")
+        == "INSURANCE\n\nforegoing provisions"
+    )

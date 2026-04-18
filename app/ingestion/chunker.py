@@ -35,9 +35,14 @@ class Chunk:
     section_title: str | None = None
 
 
+def indexed_text_from_parts(text: str, section_title: str | None) -> str:
+    """Return retrieval-only indexed text from raw text and inherited heading."""
+    return f"{section_title}\n\n{text}" if section_title else text
+
+
 def indexed_text(chunk: Chunk) -> str:
     """Return the retrieval-only text used for embeddings and BM25 indexing."""
-    return f"{chunk.section_title}\n\n{chunk.text}" if chunk.section_title else chunk.text
+    return indexed_text_from_parts(chunk.text, chunk.section_title)
 
 
 def _approx_tokens(text: str) -> int:
@@ -61,6 +66,8 @@ def _body_size(blocks: list[Block]) -> float:
         return 11.0
 
     counts = Counter(sizes)
+    # Conservative tie-break: prefer the smaller equally-common size as body
+    # text so larger sizes are more likely to be treated as headings.
     return min(
         (size for size, count in counts.items() if count == max(counts.values())),
         default=11.0,
@@ -149,6 +156,8 @@ def chunk_pages(
         body_size = _body_size(page.blocks)
         # Grouping by heading helps keep related information in the same chunk.
         for group in _group_by_heading(page):
+            inherited_section = current_section
+            section_title = inherited_section
             if group and _is_heading(group[0], body_size):
                 current_section = group[0].text.strip() or current_section
             text = " ".join(block.text for block in group).strip()
@@ -168,7 +177,7 @@ def chunk_pages(
                         token_count=_approx_tokens(part),
                         bbox=bbox,
                         source="ocr" if page.page_num in ocr_page_nums else "pdf_text",
-                        section_title=current_section,
+                        section_title=section_title,
                     )
                 )
 

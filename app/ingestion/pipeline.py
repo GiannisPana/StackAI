@@ -16,7 +16,7 @@ from typing import Any
 
 from app.config import get_settings
 from app.deps import get_store
-from app.ingestion.chunker import Chunk, chunk_pages, indexed_text
+from app.ingestion.chunker import chunk_pages, indexed_text, indexed_text_from_parts
 from app.ingestion.ocr_fallback import apply_ocr_fallback
 from app.ingestion.pdf_parser import parse_pdf
 from app.mistral_client import MistralProtocol
@@ -153,20 +153,7 @@ def ingest_pdf(client: MistralProtocol, *, filename: str, pdf_bytes: bytes) -> d
             # Step C: Stage BM25 Index update
             bm25 = BM25Index(k1=settings.bm25_k1, b=settings.bm25_b)
             for row_id, text, section_title in fetch_ready_chunks_for_rebuild(conn):
-                bm25.add(
-                    row_id,
-                    indexed_text(
-                        Chunk(
-                            page=0,
-                            ordinal=0,
-                            text=text,
-                            token_count=0,
-                            bbox=(0.0, 0.0, 0.0, 0.0),
-                            source="pdf_text",
-                            section_title=section_title,
-                        )
-                    ),
-                )
+                bm25.add(row_id, indexed_text_from_parts(text, section_title))
             for offset, chunk in enumerate(chunks):
                 bm25.add(base_row + offset, indexed_text(chunk))
             bm25.finalize()

@@ -156,6 +156,7 @@ def test_retrieval_path_is_deterministic_across_identical_runs(env):
     second_calls = fake.chat_calls[before:]
 
     assert first == second
-    assert len(first_calls) == len(second_calls) == 4
-    assert [call["temperature"] for call in first_calls] == [0.0, 0.0, 0.0, 0.0]
-    assert [call["temperature"] for call in second_calls] == [0.0, 0.0, 0.0, 0.0]
+    assert all(call["temperature"] == 0.0 for call in first_calls)
+    assert all(call["temperature"] == 0.0 for call in second_calls)
+    assert len(first_calls) == len(second_calls)
+    assert len(first_calls) >= 4

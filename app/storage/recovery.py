@@ -11,7 +11,7 @@ import numpy as np
 
 from app.config import get_settings
 from app.deps import get_store
-from app.ingestion.chunker import Chunk, indexed_text
+from app.ingestion.chunker import indexed_text_from_parts
 from app.retrieval.bm25 import TOKENIZER_VERSION, BM25Index
 from app.storage.bm25_store import load_bm25, save_bm25
 from app.storage.db import get_connection, transaction
@@ -79,20 +79,7 @@ def run_recovery() -> None:
         if need_rebuild:
             bm25 = BM25Index(k1=settings.bm25_k1, b=settings.bm25_b)
             for row, text, section_title in fetch_ready_chunks_for_rebuild(conn):
-                bm25.add(
-                    row,
-                    indexed_text(
-                        Chunk(
-                            page=0,
-                            ordinal=0,
-                            text=text,
-                            token_count=0,
-                            bbox=(0.0, 0.0, 0.0, 0.0),
-                            source="pdf_text",
-                            section_title=section_title,
-                        )
-                    ),
-                )
+                bm25.add(row, indexed_text_from_parts(text, section_title))
             bm25.finalize()
             save_bm25(settings.bm25_path, bm25)
 
