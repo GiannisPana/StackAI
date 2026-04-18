@@ -22,7 +22,12 @@ class MistralProtocol(Protocol):
         """Embeds a batch of strings into a matrix."""
         ...
 
-    def chat(self, messages: list[dict], response_format: Any = None) -> Any:
+    def chat(
+        self,
+        messages: list[dict],
+        response_format: Any = None,
+        temperature: float | None = None,
+    ) -> Any:
         """Performs a chat completion request."""
         ...
 
@@ -78,7 +83,12 @@ class MistralClient:
         norms[norms == 0] = 1.0  # Avoid division by zero
         return (matrix / norms).astype(np.float32)
 
-    def chat(self, messages: list[dict], response_format: Any = None) -> Any:
+    def chat(
+        self,
+        messages: list[dict],
+        response_format: Any = None,
+        temperature: float | None = None,
+    ) -> Any:
         """Sends a chat request to the Mistral AI API.
 
         Supports structured JSON output if a response_format is provided.
@@ -88,6 +98,8 @@ class MistralClient:
         kwargs: dict[str, Any] = {"model": self.chat_model, "messages": messages}
         if response_format is not None:
             kwargs["response_format"] = {"type": "json_object"}
+        if temperature is not None:
+            kwargs["temperature"] = temperature
         response = self._client.chat.complete(**kwargs)
         content = response.choices[0].message.content
         if response_format is not None:

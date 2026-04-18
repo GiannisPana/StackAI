@@ -85,6 +85,7 @@ def llm_rerank(
                 {"role": "user", "content": user_content},
             ],
             response_format={"type": "json_object"},
+            temperature=0.0,
         )
     except Exception:
         # Network / client error — preserve original order.

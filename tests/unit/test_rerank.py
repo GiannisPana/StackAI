@@ -163,7 +163,7 @@ def test_rerank_network_error_keeps_original_order():
     """A client that raises during chat must not propagate the exception."""
 
     class BrokenClient:
-        def chat(self, messages, response_format=None):  # noqa: ANN001
+        def chat(self, messages, response_format=None, temperature=None):  # noqa: ANN001
             raise RuntimeError("timeout")
 
         def embed(self, text):  # noqa: ANN001
@@ -211,3 +211,42 @@ def test_rerank_score_entry_with_bad_types_is_skipped():
     scored = {c.row: c.score for c in out}
     assert scored[0] == 0.5
     assert scored[1] == 0.0
+
+
+def test_rerank_pins_temperature_to_zero():
+    """Retrieval reranking should request deterministic chat completions."""
+
+    class RecordingClient:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def chat(self, messages, response_format=None, temperature=None):  # noqa: ANN001
+            self.calls.append(
+                {
+                    "messages": messages,
+                    "response_format": response_format,
+                    "temperature": temperature,
+                }
+            )
+            return {"scores": [{"id": "0", "score": 0.9}]}
+
+        def embed(self, text):  # noqa: ANN001
+            raise NotImplementedError
+
+        def embed_batch(self, texts):  # noqa: ANN001
+            raise NotImplementedError
+
+        def ocr(self, pdf_bytes):  # noqa: ANN001
+            raise NotImplementedError
+
+    client = RecordingClient()
+
+    llm_rerank(
+        client,  # type: ignore[arg-type]
+        query="q",
+        candidates=_cands((0, 0.5)),
+        chunk_texts={0: "alpha"},
+    )
+
+    assert len(client.calls) == 1
+    assert client.calls[0]["temperature"] == 0.0

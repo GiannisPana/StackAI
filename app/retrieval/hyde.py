@@ -32,5 +32,5 @@ def hyde_expand(client: MistralProtocol, query: str) -> str:
         Returns an empty string if the LLM response is empty.
     """
     messages = [{"role": "user", "content": _HYDE_PROMPT.format(query=query)}]
-    response = client.chat(messages)
+    response = client.chat(messages, temperature=0.0)
     return (response or "").strip()

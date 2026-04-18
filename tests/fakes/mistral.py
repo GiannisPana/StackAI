@@ -42,6 +42,7 @@ class FakeMistralClient:
         self._ocr_page_rules: dict[int, str] = {}
         self.embed_call_count = 0
         self.chat_call_count = 0
+        self.chat_calls: list[dict[str, Any]] = []
 
     def register_vector(self, text: str, vector: np.ndarray) -> None:
         """
@@ -107,7 +108,12 @@ class FakeMistralClient:
         """
         return np.stack([self.embed(text) for text in texts])
 
-    def chat(self, messages: list[dict], response_format: Any = None) -> Any:
+    def chat(
+        self,
+        messages: list[dict],
+        response_format: Any = None,
+        temperature: float | None = None,
+    ) -> Any:
         """
         Simulate a chat completion request.
 
@@ -115,6 +121,13 @@ class FakeMistralClient:
         regex patterns. Returns the first matching response or a default.
         """
         self.chat_call_count += 1
+        self.chat_calls.append(
+            {
+                "messages": messages,
+                "response_format": response_format,
+                "temperature": temperature,
+            }
+        )
         content = " ".join(message.get("content", "") for message in messages)
         for pattern, response in self._chat_rules:
             if re.search(pattern, content, re.IGNORECASE):

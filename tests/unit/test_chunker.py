@@ -7,6 +7,7 @@ chunks for retrieval while preserving context through boundaries and overlap.
 
 from __future__ import annotations
 
+import app.ingestion.chunker as chunker
 from app.ingestion.chunker import _approx_tokens, chunk_pages
 from app.ingestion.pdf_parser import Block, PageContent
 
@@ -126,3 +127,81 @@ def test_ocr_pages_mark_chunk_source_at_creation():
     sources_by_page = {chunk.page: chunk.source for chunk in chunks}
     assert sources_by_page[1] == "pdf_text"
     assert sources_by_page[2] == "ocr"
+
+
+def test_section_title_carries_forward_across_pages():
+    """
+    A heading on one page should become the retrieval section title for
+    following body-only pages until another heading overrides it.
+    """
+    page1 = _page(1, [("INSURANCE", 24), ("coverage terms", 11)])
+    page2 = _page(2, [("foregoing provisions apply to subcontractors", 11)])
+
+    chunks = chunk_pages([page1, page2], max_tokens=100, overlap=0)
+
+    assert [getattr(chunk, "section_title", None) for chunk in chunks] == [
+        None,
+        "INSURANCE",
+    ]
+
+
+def test_last_heading_wins_for_subsection_chunks():
+    """
+    The most recent detected heading should override an earlier one even when
+    it uses a smaller font, as long as it still counts as a heading.
+    """
+    page1 = _page(
+        1,
+        [
+            ("INSURANCE", 24),
+            ("general body", 11),
+            ("6.B Subcontractor Coverage", 18),
+            ("subcontractor body", 11),
+        ],
+    )
+    page2 = _page(2, [("continued subcontractor body", 11)])
+
+    chunks = chunk_pages([page1, page2], max_tokens=100, overlap=0)
+
+    assert [chunk.text for chunk in chunks] == [
+        "INSURANCE general body",
+        "6.B Subcontractor Coverage subcontractor body",
+        "continued subcontractor body",
+    ]
+    assert [getattr(chunk, "section_title", None) for chunk in chunks] == [
+        None,
+        "INSURANCE",
+        "6.B Subcontractor Coverage",
+    ]
+
+
+def test_indexed_text_prefixes_section_title_only_when_present():
+    """
+    The retrieval-only indexed text should prepend the section title when one
+    exists, while leaving plain chunks untouched.
+    """
+    titled = chunker.Chunk(
+        page=1,
+        ordinal=0,
+        text="foregoing provisions",
+        token_count=2,
+        bbox=(0, 0, 10, 10),
+        source="pdf_text",
+        section_title="INSURANCE",
+    )
+    untitled = chunker.Chunk(
+        page=1,
+        ordinal=1,
+        text="plain text",
+        token_count=2,
+        bbox=(0, 0, 10, 10),
+        source="pdf_text",
+        section_title=None,
+    )
+
+    assert chunker.indexed_text(titled) == "INSURANCE\n\nforegoing provisions"
+    assert chunker.indexed_text(untitled) == "plain text"
+    assert (
+        chunker.indexed_text_from_parts("foregoing provisions", "INSURANCE")
+        == "INSURANCE\n\nforegoing provisions"
+    )

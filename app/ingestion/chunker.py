@@ -7,6 +7,7 @@ during retrieval.
 """
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 
 from app.ingestion.pdf_parser import Block, PageContent
@@ -31,6 +32,17 @@ class Chunk:
     token_count: int
     bbox: tuple[float, float, float, float]
     source: str
+    section_title: str | None = None
+
+
+def indexed_text_from_parts(text: str, section_title: str | None) -> str:
+    """Return retrieval-only indexed text from raw text and inherited heading."""
+    return f"{section_title}\n\n{text}" if section_title else text
+
+
+def indexed_text(chunk: Chunk) -> str:
+    """Return the retrieval-only text used for embeddings and BM25 indexing."""
+    return indexed_text_from_parts(chunk.text, chunk.section_title)
 
 
 def _approx_tokens(text: str) -> int:
@@ -45,6 +57,21 @@ def _is_heading(block: Block, body_size: float) -> bool:
     Layout heuristic: Headings are typically significantly larger than body text.
     """
     return block.font_size >= body_size * 1.3
+
+
+def _body_size(blocks: list[Block]) -> float:
+    """Estimate the dominant body-text font size for a set of blocks."""
+    sizes = [block.font_size for block in blocks if block.font_size > 0]
+    if not sizes:
+        return 11.0
+
+    counts = Counter(sizes)
+    # Conservative tie-break: prefer the smaller equally-common size as body
+    # text so larger sizes are more likely to be treated as headings.
+    return min(
+        (size for size, count in counts.items() if count == max(counts.values())),
+        default=11.0,
+    )
 
 
 def _union_bbox(blocks: list[Block]) -> tuple[float, float, float, float]:
@@ -68,8 +95,7 @@ def _group_by_heading(page: PageContent) -> list[list[Block]]:
         return []
 
     # Heuristic: Identify the dominant font size on the page as the body size.
-    sizes = [block.font_size for block in page.blocks if block.font_size > 0]
-    body_size = sorted(sizes)[len(sizes) // 2] if sizes else 11.0
+    body_size = _body_size(page.blocks)
     
     groups: list[list[Block]] = []
     current: list[Block] = []
@@ -124,10 +150,16 @@ def chunk_pages(
     """
     chunks: list[Chunk] = []
     ocr_page_nums = ocr_pages or set()
+    current_section: str | None = None
 
     for page in pages:
+        body_size = _body_size(page.blocks)
         # Grouping by heading helps keep related information in the same chunk.
         for group in _group_by_heading(page):
+            inherited_section = current_section
+            section_title = inherited_section
+            if group and _is_heading(group[0], body_size):
+                current_section = group[0].text.strip() or current_section
             text = " ".join(block.text for block in group).strip()
             if not text:
                 continue
@@ -145,6 +177,7 @@ def chunk_pages(
                         token_count=_approx_tokens(part),
                         bbox=bbox,
                         source="ocr" if page.page_num in ocr_page_nums else "pdf_text",
+                        section_title=section_title,
                     )
                 )
 

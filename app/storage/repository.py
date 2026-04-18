@@ -76,8 +76,8 @@ def insert_chunks(conn: sqlite3.Connection, doc_id: int, chunks: list[Chunk]) ->
     embeddings are generated and persisted.
     """
     conn.executemany(
-        "INSERT INTO chunks (doc_id, ordinal, page, bbox_x0, bbox_y0, bbox_x1, bbox_y1, text, token_count, embedding_row, source) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO chunks (doc_id, ordinal, page, bbox_x0, bbox_y0, bbox_x1, bbox_y1, text, token_count, section_title, embedding_row, source) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (
                 doc_id,
@@ -89,6 +89,7 @@ def insert_chunks(conn: sqlite3.Connection, doc_id: int, chunks: list[Chunk]) ->
                 chunk.bbox[3],
                 chunk.text,
                 chunk.token_count,
+                chunk.section_title,
                 None,
                 chunk.source,
             )
@@ -150,18 +151,25 @@ def mark_processing_and_failed_as_failed(conn: sqlite3.Connection) -> list[int]:
     return ids
 
 
-def fetch_ready_chunks_for_rebuild(conn: sqlite3.Connection) -> list[tuple[int, str]]:
+def fetch_ready_chunks_for_rebuild(conn: sqlite3.Connection) -> list[tuple[int, str, str | None]]:
     """Retrieves text and embedding row mapping for all ready documents.
 
     Used primarily for rebuilding the BM25 keyword index from scratch.
     """
     rows = conn.execute(
-        "SELECT c.embedding_row, c.text FROM chunks c "
+        "SELECT c.embedding_row, c.text, c.section_title FROM chunks c "
         "JOIN documents d ON d.id = c.doc_id "
         "WHERE d.status = 'ready' AND d.is_deleted = 0 AND c.embedding_row IS NOT NULL "
         "ORDER BY c.embedding_row"
     ).fetchall()
-    return [(int(row["embedding_row"]), str(row["text"])) for row in rows]
+    return [
+        (
+            int(row["embedding_row"]),
+            str(row["text"]),
+            None if row["section_title"] is None else str(row["section_title"]),
+        )
+        for row in rows
+    ]
 
 
 def ready_row_set(conn: sqlite3.Connection) -> set[int]:
