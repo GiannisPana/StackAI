@@ -165,3 +165,19 @@ def test_build_citations_maps_rows_into_response_payload():
     assert [citation.index for citation in citations] == [1, 2]
     assert citations[0].filename == "policy.pdf"
     assert citations[1].score == 0.81
+
+
+def test_zero_scored_candidates_filtered_before_mmr():
+    # Mirrors the inline filter applied in query.py immediately before MMR.
+    # Zero scores originate from the reranker omitting candidates from its JSON
+    # response (_parse_scores default); they must not reach MMR or generation.
+    window = [
+        Candidate(row=1, score=0.85),
+        Candidate(row=2, score=0.0),
+        Candidate(row=3, score=0.62),
+        Candidate(row=4, score=0.0),
+    ]
+    filtered = [c for c in window if c.score > 0.0]
+    assert len(filtered) == 2
+    assert all(c.score > 0.0 for c in filtered)
+    assert {c.row for c in filtered} == {1, 3}

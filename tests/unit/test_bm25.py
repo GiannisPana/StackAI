@@ -127,3 +127,76 @@ def test_bm25_persist_roundtrip(tmp_path):
 
     # The scores should be identical
     assert index.top_k(["beta"], k=5) == loaded.top_k(["beta"], k=5)
+
+
+def test_bm25_persist_roundtrip_preserves_tokenizer_version(tmp_path):
+    index = BM25Index()
+    index.add(1, "alpha beta")
+    index.finalize()
+    path = tmp_path / "bm25.json"
+    save_bm25(path, index)
+    loaded = load_bm25(path)
+    from app.retrieval.bm25 import TOKENIZER_VERSION
+    assert loaded.tokenizer_version == TOKENIZER_VERSION
+
+
+def test_bm25_from_dict_defaults_v1_when_version_missing():
+    index = BM25Index()
+    index.add(1, "hello world")
+    index.finalize()
+    data = index.to_dict()
+    del data["tokenizer_version"]
+    restored = BM25Index.from_dict(data)
+    assert restored.tokenizer_version == "v1"
+
+
+# --- Tokenizer regression tests for I4 ---
+
+def test_tokenize_currency_amount():
+    assert tokenize("$25,000") == ["25,000"]
+
+
+def test_tokenize_version_number():
+    assert tokenize("v3.14") == ["v3.14"]
+
+
+def test_tokenize_contraction_preserved():
+    assert tokenize("don't") == ["don't"]
+
+
+def test_tokenize_hyphen_splits_words():
+    # Hyphens intentionally excluded from internal-separator set.
+    assert tokenize("ID-00123") == ["id", "00123"]
+
+
+def test_tokenize_hyphen_splits_phrase():
+    # Hyphens split; stopwords (of, the) are then filtered.
+    assert tokenize("state-of-the-art") == ["state", "art"]
+
+
+# --- Retrieval-level regression for the motivating contract bug ---
+
+def test_bm25_retrieves_dollar_threshold_chunks_over_generic_flow_down():
+    """Regression for the contract-threshold miss.
+
+    Without I4, ``$25,000`` tokenises to ``['25', '000']`` and a query for
+    ``$25,000`` loses the exact-match signal. Chunks mentioning the specific
+    threshold must outrank a generic flow-down clause that shares only the
+    ``subconsultant`` keyword.
+    """
+    index = BM25Index()
+    # Chunk 0: generic flow-down boilerplate (page 9 in the real contract).
+    index.add(0, "Consultant shall flow down all applicable terms to each subconsultant.")
+    # Chunk 1: $25,000 threshold (page 7/9 in the real contract).
+    index.add(1, "Any subconsultant agreement exceeding $25,000 requires written approval.")
+    # Chunk 2: $50,000 threshold (page 5 in the real contract).
+    index.add(2, "Subconsultants with contracts above $50,000 require client consent.")
+    index.finalize()
+
+    hits = dict(index.top_k(tokenize("What is the $25,000 subconsultant threshold?"), k=3))
+
+    assert 1 in hits, "chunk containing $25,000 must be retrieved"
+    assert hits[1] > hits[0], (
+        "chunk with the exact $25,000 threshold must outrank the generic "
+        "flow-down clause that only shares the 'subconsultant' token"
+    )

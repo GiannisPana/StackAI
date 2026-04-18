@@ -7,12 +7,14 @@ This module implements the full RAG loop in eight stages:
 2. Query transform — intent classification and retrieval rewriting via LLM.
 3. Short-circuit for NO_SEARCH (greetings / chit-chat) and REFUSE (policy).
 4. Hybrid retrieval (vector + BM25 + RRF) using the rewritten query.
-5. LLM rerank over the top-20 candidates + insufficient-evidence threshold gate.
+5. LLM rerank over the top-20 candidates; HyDE fallback re-retrieval + re-rerank
+   if the top rerank score is below ``threshold_low``; insufficient-evidence
+   threshold gate.
 6. MMR diversity selection over the reranked set.
 7. Generation of a cited answer using the configured LLM.
 8. Citation-anchored verification of the final answer.
 
-The threshold gate (step 4) implements the bonus "citations required" feature:
+The threshold gate (step 5) implements the bonus "citations required" feature:
 if the top rerank score is below ``settings.threshold_high`` *and* the score
 distribution is insufficiently spread (no clear winner), the endpoint refuses
 with ``refusal_reason="insufficient_evidence"`` rather than hallucinating.
@@ -120,7 +122,7 @@ def _threshold_passed(
     median = candidates[len(candidates) // 2].score
     if top_score > 0:
         spread = (top_score - median) / top_score
-        if spread >= spread_min and spread > 0:
+        if spread >= spread_min:
             return True, top_score
 
     return False, top_score
@@ -495,6 +497,34 @@ def query_endpoint(req: QueryRequest) -> QueryResponse:
     # ------------------------------------------------------------------
     # Step 6: MMR diversity selection over the reranked set.
     # ------------------------------------------------------------------
+    # Drop zero-scored candidates (reranker omitted them from its JSON response)
+    # only here, after the threshold gate, so HyDE still sees the full window.
+    rerank_window = [c for c in rerank_window if c.score > 0.0]
+    # If the filter empties the window, the reranker scored no candidate as
+    # relevant — treat as insufficient evidence. This also covers the
+    # single-candidate edge case where the threshold gate bypass lets a
+    # score=0.0 row through.
+    if not rerank_window:
+        return _build_response(
+            answer="I don't have sufficient evidence in the indexed documents to answer this question.",
+            intent="search",
+            policy_info=policy_info,
+            warnings=warnings,
+            timings=timings,
+            t0=t0,
+            settings=settings,
+            format=response_format,
+            sub_intent=transform.sub_intent,
+            refusal_reason="insufficient_evidence",
+            debug_extra={
+                "rewritten_query": transform.rewritten_query,
+                "expansion_queries": transform.expansion_queries,
+                "used_hyde": used_hyde,
+                "num_candidates": len(candidates),
+                "top_score": float(top_score),
+                "threshold": settings.threshold_high,
+            },
+        )
     if len(rerank_window) > req.top_k:
         store = get_store()
         rerank_vecs = np.stack([store.embeddings[c.row] for c in rerank_window])

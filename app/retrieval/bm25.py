@@ -21,8 +21,11 @@ which who whom why will with you your yours
 """.split()
 )
 
-# Regular expression to identify word-like tokens
-WORD_RE = re.compile(r"[A-Za-z0-9']+")
+TOKENIZER_VERSION = "v2"
+
+# Matches whole words plus internal separators (.,') to preserve tokens like
+# "$25,000" → "25,000" and "v3.14" → "v3.14" while still splitting on hyphens.
+WORD_RE = re.compile(r"[A-Za-z0-9]+(?:[.,'][A-Za-z0-9]+)*")
 
 
 def tokenize(text: str) -> list[str]:
@@ -62,6 +65,7 @@ class BM25Index:
         """
         self.k1 = k1
         self.b = b
+        self.tokenizer_version = TOKENIZER_VERSION
         self._doc_len: dict[int, int] = {}
         self._postings: dict[str, dict[int, int]] = defaultdict(dict)
         self._avgdl = 0.0
@@ -165,6 +169,7 @@ class BM25Index:
             A dictionary containing all index state.
         """
         return {
+            "tokenizer_version": self.tokenizer_version,
             "k1": self.k1,
             "b": self.b,
             "num_docs": self._num_docs,
@@ -184,6 +189,7 @@ class BM25Index:
             A restored BM25Index instance.
         """
         index = cls(k1=float(data["k1"]), b=float(data["b"]))
+        index.tokenizer_version = data.get("tokenizer_version", "v1")
         index._doc_len = {int(key): int(value) for key, value in data["doc_len"].items()}
         index._postings = defaultdict(
             dict,

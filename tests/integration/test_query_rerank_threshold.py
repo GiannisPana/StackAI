@@ -197,6 +197,73 @@ def test_high_rerank_produces_citations(high_score_client):
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def zero_score_client(tmp_path, monkeypatch):
+    """
+    A TestClient whose reranker returns an empty score list, so every
+    candidate hits the omission path in _parse_scores and defaults to 0.0.
+    Mirrors the reranker-omitted-everything real-world case.
+    """
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MISTRAL_API_KEY", "x")
+    monkeypatch.setenv("EMBEDDING_DIM", "8")
+    monkeypatch.setenv("DEBUG", "1")
+    app.config._settings = None
+
+    fake = FakeMistralClient(dim=8)
+    fake.register_chat(
+        r"classify",
+        {
+            "intent": "SEARCH",
+            "sub_intent": "factual",
+            "rewritten_query": "contract terms",
+            "expansion_queries": [],
+        },
+    )
+    # Reranker omits every candidate — each one defaults to 0.0.
+    fake.register_chat(r"relevance", {"scores": []})
+    fake.register_chat(r"Context:", "Answer [1].")
+
+    monkeypatch.setattr(ingest_mod, "get_mistral_client", lambda: fake)
+    monkeypatch.setattr(query_mod, "get_mistral_client", lambda: fake)
+
+    application = create_app()
+    with TestClient(application) as c:
+        yield c
+
+    reset_store()
+    app.config._settings = None
+
+
+def test_zero_reranker_scores_on_single_candidate_refuses_cleanly(zero_score_client):
+    """Regression for the post-I5 crash path.
+
+    With a single candidate the threshold gate bypasses (``len(candidates) < 2``
+    short-circuit). If that candidate's rerank score is 0.0 (reranker omitted
+    it), the zero-score filter then empties the window. The endpoint must
+    refuse with insufficient_evidence instead of raising IndexError while
+    building the debug payload.
+    """
+    _ingest_pdf(zero_score_client, "some isolated contract clause content", "1.pdf")
+    r = zero_score_client.post("/query", json={"query": "contract terms?"})
+    body = r.json()
+    assert r.status_code == 200
+    assert body["refusal_reason"] == "insufficient_evidence"
+    assert body["citations"] == []
+
+
+def test_zero_reranker_scores_on_multi_candidate_refuses_cleanly(zero_score_client):
+    """With multiple candidates the threshold gate already refuses, but the
+    test pins the behaviour in case the gate logic is ever relaxed."""
+    _ingest_pdf(zero_score_client, "one document body", "1.pdf")
+    _ingest_pdf(zero_score_client, "another document body", "2.pdf")
+    r = zero_score_client.post("/query", json={"query": "contract terms?"})
+    body = r.json()
+    assert r.status_code == 200
+    assert body["refusal_reason"] == "insufficient_evidence"
+    assert body["citations"] == []
+
+
 def test_disable_llm_rerank_bypasses_reranker(high_score_client, monkeypatch):
     """
     When enable_llm_rerank=False the endpoint must skip the LLM rerank call
