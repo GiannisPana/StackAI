@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     bbox_y1        REAL,
     text           TEXT NOT NULL,
     token_count    INTEGER NOT NULL,
+    section_title  TEXT,
     embedding_row  INTEGER UNIQUE,
     source         TEXT NOT NULL CHECK(source IN ('pdf_text','ocr'))
 );

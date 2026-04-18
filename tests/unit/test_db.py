@@ -84,3 +84,72 @@ def test_meta_seeded(db):
         assert int(dim["value"]) == 1024
     finally:
         conn.close()
+
+
+def test_init_schema_adds_missing_section_title_column(tmp_path, monkeypatch):
+    """
+    Existing databases created before section-aware chunking should be migrated
+    in place so the new column appears without requiring manual intervention.
+    """
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MISTRAL_API_KEY", "x")
+
+    import app.config
+
+    app.config._settings = None
+    db_path = tmp_path / "app.sqlite3"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            INSERT INTO meta (key, value) VALUES ('embedding_dim', '1024');
+            INSERT INTO meta (key, value) VALUES ('embedding_model', 'mistral-embed');
+            INSERT INTO meta (key, value) VALUES ('schema_version', '1');
+
+            CREATE TABLE documents (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename       TEXT NOT NULL,
+                sha256         TEXT NOT NULL UNIQUE,
+                num_pages      INTEGER NOT NULL,
+                num_chunks     INTEGER NOT NULL,
+                ocr_pages      INTEGER NOT NULL DEFAULT 0,
+                status         TEXT NOT NULL CHECK(status IN ('processing','ready','failed')),
+                is_deleted     INTEGER NOT NULL DEFAULT 0,
+                deleted_at     TEXT,
+                ingested_at    TEXT NOT NULL
+            );
+
+            CREATE TABLE chunks (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                doc_id         INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                ordinal        INTEGER NOT NULL,
+                page           INTEGER NOT NULL,
+                bbox_x0        REAL,
+                bbox_y0        REAL,
+                bbox_x1        REAL,
+                bbox_y1        REAL,
+                text           TEXT NOT NULL,
+                token_count    INTEGER NOT NULL,
+                embedding_row  INTEGER UNIQUE,
+                source         TEXT NOT NULL CHECK(source IN ('pdf_text','ocr'))
+            );
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    init_schema()
+
+    migrated = get_connection()
+    try:
+        columns = {
+            row["name"] for row in migrated.execute("PRAGMA table_info(chunks)").fetchall()
+        }
+        assert "section_title" in columns
+    finally:
+        migrated.close()

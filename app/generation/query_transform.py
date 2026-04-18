@@ -122,7 +122,11 @@ def transform_query(client: MistralProtocol, query: str) -> QueryTransform:
 
     resp: Any = None
     try:
-        resp = client.chat(messages, response_format={"type": "json_object"})
+        resp = client.chat(
+            messages,
+            response_format={"type": "json_object"},
+            temperature=0.0,
+        )
     except Exception:
         # Network error or any other exception → fall back silently.
         pass

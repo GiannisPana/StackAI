@@ -59,7 +59,7 @@ class _FakeClient:
     def embed_batch(self, texts):  # type: ignore[override]
         raise NotImplementedError
 
-    def chat(self, messages, response_format=None):  # type: ignore[override]
+    def chat(self, messages, response_format=None, temperature=None):  # type: ignore[override]
         raise NotImplementedError
 
 

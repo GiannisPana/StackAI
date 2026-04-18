@@ -58,6 +58,11 @@ def init_schema() -> None:
     conn = get_connection()
     try:
         conn.executescript(ddl)
+        chunk_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(chunks)").fetchall()
+        }
+        if "section_title" not in chunk_columns:
+            conn.execute("ALTER TABLE chunks ADD COLUMN section_title TEXT")
         existing = {row["key"] for row in conn.execute("SELECT key FROM meta")}
         seed = {
             "embedding_model": settings.embedding_model,

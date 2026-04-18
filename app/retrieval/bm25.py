@@ -21,7 +21,7 @@ which who whom why will with you your yours
 """.split()
 )
 
-TOKENIZER_VERSION = "v2"
+TOKENIZER_VERSION = "v3"
 
 # Matches whole words plus internal separators (.,') to preserve tokens like
 # "$25,000" → "25,000" and "v3.14" → "v3.14" while still splitting on hyphens.

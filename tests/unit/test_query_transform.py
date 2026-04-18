@@ -161,7 +161,7 @@ def test_network_error_falls_back_gracefully():
     """
 
     class BrokenClient:
-        def chat(self, messages, response_format=None):  # noqa: ANN001
+        def chat(self, messages, response_format=None, temperature=None):  # noqa: ANN001
             raise RuntimeError("network down")
 
         def embed(self, text):  # noqa: ANN001
@@ -204,3 +204,42 @@ def test_result_is_frozen_dataclass():
     )
     with pytest.raises((AttributeError, TypeError)):
         result.intent = "no_search"  # type: ignore[misc]
+
+
+def test_transform_query_pins_temperature_to_zero_for_retrieval_calls():
+    """Retrieval rewrites should request deterministic chat completions."""
+
+    class RecordingClient:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def chat(self, messages, response_format=None, temperature=None):  # noqa: ANN001
+            self.calls.append(
+                {
+                    "messages": messages,
+                    "response_format": response_format,
+                    "temperature": temperature,
+                }
+            )
+            return {
+                "intent": "SEARCH",
+                "sub_intent": None,
+                "rewritten_query": "rewritten",
+                "expansion_queries": [],
+            }
+
+        def embed(self, text):  # noqa: ANN001
+            raise NotImplementedError
+
+        def embed_batch(self, texts):  # noqa: ANN001
+            raise NotImplementedError
+
+        def ocr(self, pdf_bytes):  # noqa: ANN001
+            raise NotImplementedError
+
+    client = RecordingClient()
+
+    transform_query(client, "original query")  # type: ignore[arg-type]
+
+    assert len(client.calls) == 1
+    assert client.calls[0]["temperature"] == 0.0

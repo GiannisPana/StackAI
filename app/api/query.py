@@ -7,7 +7,7 @@ This module implements the full RAG loop in eight stages:
 2. Query transform — intent classification and retrieval rewriting via LLM.
 3. Short-circuit for NO_SEARCH (greetings / chit-chat) and REFUSE (policy).
 4. Hybrid retrieval (vector + BM25 + RRF) using the rewritten query.
-5. LLM rerank over the top-20 candidates; HyDE fallback re-retrieval + re-rerank
+5. LLM rerank over the top-40 candidates; HyDE fallback re-retrieval + re-rerank
    if the top rerank score is below ``threshold_low``; insufficient-evidence
    threshold gate.
 6. MMR diversity selection over the reranked set.
@@ -45,7 +45,7 @@ from app.storage.repository import resolve_document_filter, row_set_for_document
 
 router = APIRouter()
 
-_RERANK_WINDOW = 20
+_RERANK_WINDOW = 40
 
 
 def _load_chunks(rows: list[int]) -> dict[int, dict]:

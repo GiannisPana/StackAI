@@ -8,6 +8,7 @@ and persistence (save/load).
 
 from __future__ import annotations
 
+from app.ingestion.chunker import Chunk, indexed_text
 from app.retrieval.bm25 import BM25Index, tokenize
 from app.storage.bm25_store import load_bm25, save_bm25
 
@@ -200,3 +201,27 @@ def test_bm25_retrieves_dollar_threshold_chunks_over_generic_flow_down():
         "chunk with the exact $25,000 threshold must outrank the generic "
         "flow-down clause that only shares the 'subconsultant' token"
     )
+
+
+def test_bm25_section_title_boosts_headingless_chunk():
+    index = BM25Index()
+    index.add(
+        0,
+        indexed_text(
+            Chunk(
+                page=5,
+                ordinal=0,
+                text="subcontractor coverage clause",
+                token_count=3,
+                bbox=(0, 0, 1, 1),
+                source="pdf_text",
+                section_title="INSURANCE",
+            )
+        ),
+    )
+    index.add(1, "subcontractor coverage clause")
+    index.finalize()
+
+    hits = dict(index.top_k(tokenize("insurance subcontractor"), k=2))
+
+    assert hits[0] > hits[1]

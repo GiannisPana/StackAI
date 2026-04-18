@@ -23,8 +23,10 @@ from app.storage.repository import (
     update_chunk_embedding_rows,
     update_document_status,
 )
+from app.storage.bm25_store import save_bm25
 from app.storage.vector_store import load_matrix, save_matrix_atomic
 from app.ingestion.chunker import Chunk
+from app.retrieval.bm25 import BM25Index, tokenize
 
 
 @pytest.fixture
@@ -118,3 +120,48 @@ def test_recovery_truncates_overlong_matrix(env):
     for posts in store.bm25._postings.values():
         for row in posts.keys():
             assert row in {0, 1}
+
+
+def test_recovery_rebuilds_bm25_when_tokenizer_version_changes(env):
+    settings = get_settings()
+    save_matrix_atomic(settings.embeddings_path, np.eye(1, 4).astype(np.float32))
+
+    conn = get_connection()
+    try:
+        with transaction(conn):
+            doc_id = insert_document(conn, filename="a.pdf", sha256="a", num_pages=1, num_chunks=1)
+            insert_chunks(
+                conn,
+                doc_id,
+                [
+                    Chunk(
+                        page=5,
+                        ordinal=0,
+                        text="foregoing provisions apply to all subcontracts",
+                        token_count=6,
+                        bbox=(0, 0, 1, 1),
+                        source="pdf_text",
+                        section_title="INSURANCE",
+                    )
+                ],
+            )
+            update_chunk_embedding_rows(conn, doc_id, base_row=0)
+            update_document_status(conn, doc_id, "ready")
+    finally:
+        conn.close()
+
+    stale = BM25Index()
+    stale.add(0, "foregoing provisions apply to all subcontracts")
+    stale.finalize()
+    stale.tokenizer_version = "v2"
+    save_bm25(settings.bm25_path, stale)
+
+    set_store(Store(embeddings=load_matrix(settings.embeddings_path, expected_dim=4)))
+
+    run_recovery()
+
+    store = get_store()
+    assert store.bm25 is not None
+    assert store.bm25.tokenizer_version == "v3"
+    hits = dict(store.bm25.top_k(tokenize("insurance subcontractor"), k=5))
+    assert 0 in hits

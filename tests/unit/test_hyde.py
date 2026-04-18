@@ -34,3 +34,29 @@ def test_hyde_expand_returns_empty_string_on_no_match():
 
     result = hyde_expand(fake, "some query")
     assert isinstance(result, str)
+
+
+def test_hyde_expand_pins_temperature_to_zero():
+    class RecordingClient:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def chat(self, messages, response_format=None, temperature=None):  # noqa: ANN001
+            self.calls.append(
+                {
+                    "messages": messages,
+                    "response_format": response_format,
+                    "temperature": temperature,
+                }
+            )
+            return " hypothetical answer "
+
+    from app.retrieval.hyde import hyde_expand
+
+    client = RecordingClient()
+
+    result = hyde_expand(client, "some query")  # type: ignore[arg-type]
+
+    assert result == "hypothetical answer"
+    assert len(client.calls) == 1
+    assert client.calls[0]["temperature"] == 0.0

@@ -13,6 +13,7 @@ from app.ingestion.chunker import Chunk
 from app.storage.db import get_connection, init_schema, transaction
 from app.storage.repository import (
     DocumentRow,
+    fetch_ready_chunks_for_rebuild,
     get_document_by_sha256,
     insert_chunks,
     insert_document,
@@ -46,6 +47,7 @@ def _chunk(ord_: int) -> Chunk:
         token_count=2,
         bbox=(0, 0, 10, 10),
         source="pdf_text",
+        section_title="SECTION ONE",
     )
 
 
@@ -105,5 +107,28 @@ def test_insert_chunks_and_update_embedding_rows(db):
         doc = get_document_by_sha256(conn, "abc")
         assert doc is not None
         assert doc.status == "ready"
+    finally:
+        conn.close()
+
+
+def test_fetch_ready_chunks_for_rebuild_includes_section_title(db):
+    """
+    Recovery rebuilds need both the raw text and the persisted section title so
+    they can reconstruct retrieval-only indexed text.
+    """
+    conn = get_connection()
+    try:
+        with transaction(conn):
+            doc_id = insert_document(conn, filename="a.pdf", sha256="abc", num_pages=1, num_chunks=2)
+            insert_chunks(conn, doc_id, [_chunk(0), _chunk(1)])
+            update_chunk_embedding_rows(conn, doc_id, base_row=10)
+            update_document_status(conn, doc_id, "ready")
+
+        rows = fetch_ready_chunks_for_rebuild(conn)
+
+        assert rows == [
+            (10, "text 0", "SECTION ONE"),
+            (11, "text 1", "SECTION ONE"),
+        ]
     finally:
         conn.close()

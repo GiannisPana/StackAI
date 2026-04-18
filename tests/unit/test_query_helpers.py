@@ -181,3 +181,45 @@ def test_zero_scored_candidates_filtered_before_mmr():
     assert len(filtered) == 2
     assert all(c.score > 0.0 for c in filtered)
     assert {c.row for c in filtered} == {1, 3}
+
+
+def test_maybe_hyde_rerank_uses_full_forty_candidate_window(monkeypatch):
+    refreshed_candidates = [Candidate(row=i, score=0.8 - (i * 0.001)) for i in range(45)]
+    timings: dict[str, int] = {}
+    seen: dict[str, int] = {}
+
+    class DummyClient:
+        def embed(self, text: str) -> np.ndarray:
+            return np.array([1.0], dtype=np.float32)
+
+    monkeypatch.setattr(query_mod, "hyde_expand", lambda client, query: "hypothetical answer")
+    monkeypatch.setattr(query_mod, "hybrid_retrieve", lambda client, **kwargs: refreshed_candidates)
+    monkeypatch.setattr(
+        query_mod,
+        "_load_chunk_texts",
+        lambda rows: (
+            {row: {"text": f"chunk {row}"} for row in rows},
+            {row: f"chunk {row}" for row in rows},
+        ),
+    )
+
+    def capture_rerank(client, query, candidates, chunk_texts):
+        seen["count"] = len(candidates)
+        return candidates
+
+    monkeypatch.setattr(query_mod, "llm_rerank", capture_rerank)
+
+    query_mod._maybe_hyde_rerank(
+        DummyClient(),
+        retrieval_query="leave policy",
+        candidates=[Candidate(row=999, score=0.2)],
+        rerank_window=[Candidate(row=999, score=0.2)],
+        mask=None,
+        active_rows=set(range(45)),
+        expansion_queries=None,
+        enable_rerank=True,
+        threshold_low=0.45,
+        timings=timings,
+    )
+
+    assert seen["count"] == 40
