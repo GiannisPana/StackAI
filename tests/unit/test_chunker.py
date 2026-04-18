@@ -140,7 +140,7 @@ def test_section_title_carries_forward_across_pages():
     chunks = chunk_pages([page1, page2], max_tokens=100, overlap=0)
 
     assert [getattr(chunk, "section_title", None) for chunk in chunks] == [
-        None,
+        "INSURANCE",
         "INSURANCE",
     ]
 
@@ -169,8 +169,8 @@ def test_last_heading_wins_for_subsection_chunks():
         "continued subcontractor body",
     ]
     assert [getattr(chunk, "section_title", None) for chunk in chunks] == [
-        None,
         "INSURANCE",
+        "6.B Subcontractor Coverage",
         "6.B Subcontractor Coverage",
     ]
 

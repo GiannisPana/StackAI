@@ -58,20 +58,28 @@ def parse_pdf(pdf_bytes: bytes) -> list[PageContent]:
                 # Type 0 is text block in PyMuPDF
                 if raw_block.get("type", 0) != 0:
                     continue
-                spans: list[str] = []
-                sizes: list[float] = []
                 for line in raw_block.get("lines", []):
+                    spans: list[str] = []
+                    sizes: list[float] = []
+                    is_bold = False
                     for span in line.get("spans", []):
                         text = span.get("text", "")
                         if text:
                             spans.append(text)
                             sizes.append(float(span.get("size", 0.0)))
-                block_text = " ".join(spans).strip()
-                if not block_text:
-                    continue
-                bbox = tuple(float(value) for value in raw_block.get("bbox", (0, 0, 0, 0)))
-                avg_font_size = sum(sizes) / len(sizes) if sizes else 0.0
-                blocks.append(Block(text=block_text, bbox=bbox, font_size=avg_font_size))
+                            if "Bold" in span.get("font", ""):
+                                is_bold = True
+                    line_text = " ".join(spans).strip()
+                    if not line_text:
+                        continue
+                    bbox = tuple(float(value) for value in line.get("bbox", (0, 0, 0, 0)))
+                    avg_font_size = sum(sizes) / len(sizes) if sizes else 0.0
+                    
+                    # Artificially inflate font size for bold text to trigger heading heuristics
+                    if is_bold:
+                        avg_font_size *= 1.31
+                        
+                    blocks.append(Block(text=line_text, bbox=bbox, font_size=avg_font_size))
             pages.append(PageContent(page_num=index + 1, blocks=blocks, raw_text=raw_text))
         return pages
     finally:

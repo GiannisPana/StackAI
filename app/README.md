@@ -44,7 +44,7 @@ app/                        # main application package
 flowchart TD
     A[FastAPI app] --> B[POST /ingest]
     A --> C[POST /query]
-    A --> D[GET /documents and DELETE /documents/{id}]
+    A --> D["GET /documents and DELETE /documents/{id}"]
     A --> E[UI at /]
 
     B --> F[Parse PDF]

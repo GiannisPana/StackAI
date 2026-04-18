@@ -60,18 +60,19 @@ def _is_heading(block: Block, body_size: float) -> bool:
 
 
 def _body_size(blocks: list[Block]) -> float:
-    """Estimate the dominant body-text font size for a set of blocks."""
-    sizes = [block.font_size for block in blocks if block.font_size > 0]
-    if not sizes:
+    """Estimate the dominant body-text font size by total text length."""
+    from collections import defaultdict
+    size_weights: dict[int, int] = defaultdict(int)
+    
+    for block in blocks:
+        if block.font_size > 0:
+            size_weights[round(block.font_size)] += len(block.text)
+            
+    if not size_weights:
         return 11.0
-
-    counts = Counter(sizes)
-    # Conservative tie-break: prefer the smaller equally-common size as body
-    # text so larger sizes are more likely to be treated as headings.
-    return min(
-        (size for size, count in counts.items() if count == max(counts.values())),
-        default=11.0,
-    )
+        
+    # Set the body size to the font size that has the most characters
+    return float(max(size_weights.keys(), key=lambda k: size_weights[k]))
 
 
 def _union_bbox(blocks: list[Block]) -> tuple[float, float, float, float]:
@@ -157,9 +158,9 @@ def chunk_pages(
         # Grouping by heading helps keep related information in the same chunk.
         for group in _group_by_heading(page):
             inherited_section = current_section
-            section_title = inherited_section
             if group and _is_heading(group[0], body_size):
                 current_section = group[0].text.strip() or current_section
+            section_title = current_section
             text = " ".join(block.text for block in group).strip()
             if not text:
                 continue
